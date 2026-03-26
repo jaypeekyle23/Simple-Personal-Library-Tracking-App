@@ -1,7 +1,6 @@
-// settings_screen.dart
-
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // NEW: Firebase Auth Import
 import '../main.dart';
 import '../services/export_service.dart';
 
@@ -13,6 +12,7 @@ class _K {
   static const blueDim = Color(0xFF4A9EFF18);
   static const orange = Color(0xFFFFA040);
   static const orangeDim = Color(0xFFFFA04018);
+  static const red = Color(0xFFFF5555); // Added for the logout button
 }
 
 // ─── Theme-aware palette resolved at build time ───────────────────────────────
@@ -86,6 +86,9 @@ class SettingsScreen extends StatelessWidget {
       builder: (_, ThemeMode currentMode, __) {
         final isDark = currentMode == ThemeMode.dark;
         final p = isDark ? _P.dark() : _P.light();
+        
+        // Fetch the currently logged-in user
+        final user = FirebaseAuth.instance.currentUser;
 
         return Scaffold(
           backgroundColor: p.bg,
@@ -111,6 +114,59 @@ class SettingsScreen extends StatelessWidget {
           body: ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
             children: [
+
+              // ── ACCOUNT ─────────────────────────────────────────────────
+              if (user != null) ...[
+                _SectionLabel('ACCOUNT', p),
+                const SizedBox(height: 8),
+                _Card(
+                  p: p,
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 14),
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              backgroundColor: _K.accentDim,
+                              radius: 16,
+                              child: const Icon(Icons.person_outline_rounded,
+                                  color: _K.accent, size: 18),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Text(
+                                user.email ?? 'Unknown User',
+                                style: TextStyle(
+                                  color: p.textPrimary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      _TileDivider(p),
+                      _SettingsTile(
+                        p: p,
+                        icon: Icons.logout_rounded,
+                        iconColor: _K.red,
+                        title: 'Sign Out',
+                        subtitle: 'Log out of your account on this device',
+                        onTap: () async {
+                          // Close settings screen first
+                          Navigator.pop(context);
+                          // Log out
+                          await FirebaseAuth.instance.signOut();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+              ],
 
               // ── APPEARANCE ──────────────────────────────────────────────
               _SectionLabel('APPEARANCE', p),

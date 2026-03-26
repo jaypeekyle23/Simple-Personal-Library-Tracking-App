@@ -1,5 +1,3 @@
-// export_service.dart
-
 import 'dart:io';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -8,16 +6,26 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:file_saver/file_saver.dart';
 import 'package:file_picker/file_picker.dart'; 
-import 'package:isar/isar.dart';
+import 'package:firebase_auth/firebase_auth.dart'; 
+import 'package:cloud_firestore/cloud_firestore.dart'; 
 
-import '../main.dart'; 
 import '../models/book.dart';
 
 class ExportService {
   
   // --- HELPER METHOD: Generates the CSV string ---
   static Future<String> _generateCsvString() async {
-    final books = await isar.books.where().findAll();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return '';
+
+    // Fetch books from Firestore instead of Isar
+    final snapshot = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('books')
+        .get();
+
+    final books = snapshot.docs.map((doc) => Book.fromMap(doc.data(), doc.id)).toList();
 
     List<List<dynamic>> rows = [];
     rows.add([
@@ -39,13 +47,14 @@ class ExportService {
       ]);
     }
 
-    // THE FIX: Using the new CsvCodec syntax
+    // FIX: Removed 'const' here
     return CsvCodec().encode(rows);
   }
 
   // --- OPTION 1: Share Menu ---
   static Future<void> shareLibraryCsv() async {
     String csvData = await _generateCsvString();
+    if (csvData.isEmpty) return;
 
     final directory = await getTemporaryDirectory();
     final path = '${directory.path}/my_library_inventory.csv';
@@ -58,6 +67,7 @@ class ExportService {
   // --- OPTION 2: Download Locally ---
   static Future<void> downloadLibraryCsvLocally() async {
     String csvData = await _generateCsvString();
+    if (csvData.isEmpty) return;
     
     Uint8List bytes = Uint8List.fromList(utf8.encode(csvData));
     
@@ -73,6 +83,9 @@ class ExportService {
   // --- OPTION 3: Import CSV (Restore Data) ---
   static Future<bool> importLibraryCsv() async {
     try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return false;
+
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['csv'],
@@ -83,12 +96,18 @@ class ExportService {
         
         final csvString = await file.readAsString();
         
-        // THE FIX: Using the new CsvCodec syntax
+        // FIX: Removed 'const' here
         List<List<dynamic>> csvTable = CsvCodec().decode(csvString);
         
         if (csvTable.isEmpty || csvTable.length <= 1) return false;
 
-        final newBooks = <Book>[];
+        final booksRef = FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .collection('books');
+
+        // Use a Firestore Batch to upload all the books efficiently
+        final batch = FirebaseFirestore.instance.batch();
         
         for (int i = 1; i < csvTable.length; i++) {
           final row = csvTable[i];
@@ -105,12 +124,13 @@ class ExportService {
             ..totalPages = int.tryParse(row[7].toString())
             ..currentPage = int.tryParse(row[8].toString());
 
-          newBooks.add(book);
+          // Create a new document reference and add it to the batch
+          final newDocRef = booksRef.doc(); 
+          batch.set(newDocRef, book.toMap());
         }
 
-        await isar.writeTxn(() async {
-          await isar.books.putAll(newBooks);
-        });
+        // Commit all the books to the cloud at once!
+        await batch.commit();
 
         return true; 
       }
