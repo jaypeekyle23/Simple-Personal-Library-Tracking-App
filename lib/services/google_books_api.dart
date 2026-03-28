@@ -1,18 +1,30 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+// 1. ADD THIS IMPORT:
+import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 
 class GoogleBooksApi {
+  // 2. CHANGE THIS LINE: 
+  // It no longer has your real key. It securely fetches it from the hidden .env file!
+  static String get _apiKey => dotenv.env['BOOKS_API_KEY'] ?? ''; 
+
   static Future<List<Map<String, dynamic>>> searchBooks(String query) async {
     print('🚨 --- SEARCH INITIATED --- 🚨');
     print('🚨 1. User searched for: "$query"');
     
-    final formattedQuery = query.replaceAll(' ', '+');
-    final url = Uri.parse('https://www.googleapis.com/books/v1/volumes?q=$formattedQuery');
+    final url = Uri.https(
+      'www.googleapis.com', 
+      '/books/v1/volumes', 
+      {
+        'q': query,
+        'key': _apiKey, // This now uses the safe, hidden key
+      }
+    );
     
     print('🚨 2. Contacting Google at: $url');
     
     try {
-      final response = await http.get(url);
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
       
       print('🚨 3. Google responded with Status Code: ${response.statusCode}');
       
@@ -22,10 +34,7 @@ class GoogleBooksApi {
         
         print('🚨 4. Number of books Google returned: ${items?.length ?? 0}');
         
-        if (items == null) {
-          print('🚨 5. Google sent back 200 OK, but the items list was null!');
-          return []; 
-        }
+        if (items == null) return []; 
 
         return items.map((item) {
           final volumeInfo = item['volumeInfo'] ?? {};
@@ -39,14 +48,16 @@ class GoogleBooksApi {
           };
         }).toList();
         
+      } else if (response.statusCode == 429) {
+        print('🚨 ERROR: Rate Limited! You are sending too many requests.');
+        return [];
       } else {
-        print('🚨 ERROR: Google rejected the request!');
-        print('🚨 Reason: ${response.body}'); // This will tell us if we are rate-limited or blocked
+        print('🚨 ERROR: Google rejected the request! Status: ${response.statusCode}');
         return [];
       }
     } catch (e) {
       print('🚨 NETWORK ERROR CATCH BLOCK TRIGGERED:');
-      print('🚨 $e');
+      print('🚨 Details: $e');
       return [];
     }
   }

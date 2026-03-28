@@ -4,6 +4,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
+// 1. ADDED: Import the dotenv package so the app can read your secret file
+import 'package:flutter_dotenv/flutter_dotenv.dart'; 
+
 import 'screens/home_screen.dart';
 import 'screens/auth_screen.dart'; 
 
@@ -13,16 +16,19 @@ final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.light);
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  // 2. ADDED: Load the secret .env file BEFORE Firebase or the app starts
+  await dotenv.load(fileName: ".env");
+  
   // Initialize Firebase
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  // 1. Load saved theme preference
+  // Load saved theme preference
   final prefs = await SharedPreferences.getInstance();
   final isDarkMode = prefs.getBool('isDarkMode') ?? false; 
   
-  // 2. Update the notifier with the saved preference BEFORE running the app
+  // Update the notifier with the saved preference BEFORE running the app
   themeNotifier.value = isDarkMode ? ThemeMode.dark : ThemeMode.light;
 
   runApp(const MyLibraryApp());
