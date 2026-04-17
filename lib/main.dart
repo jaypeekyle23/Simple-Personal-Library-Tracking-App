@@ -4,38 +4,55 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
-// 1. ADDED: Import the dotenv package so the app can read your secret file
 import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 
-import 'screens/home_screen.dart';
+import 'screens/main_navigation.dart';
 import 'screens/auth_screen.dart'; 
 
-// A global variable that listens for theme changes. Starts in Light Mode by default.
-final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.light);
+import 'services/push_notification_service.dart'; 
+
+// CHANGED: Initialize the ValueNotifier with ThemeMode.dark instead of light
+final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.dark);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // 2. ADDED: Load the secret .env file BEFORE Firebase or the app starts
   await dotenv.load(fileName: ".env");
   
-  // Initialize Firebase
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  // Load saved theme preference
   final prefs = await SharedPreferences.getInstance();
-  final isDarkMode = prefs.getBool('isDarkMode') ?? false; 
+  // CHANGED: Default to true (Dark Mode) if the user has no saved preference yet
+  final isDarkMode = prefs.getBool('isDarkMode') ?? true; 
   
-  // Update the notifier with the saved preference BEFORE running the app
   themeNotifier.value = isDarkMode ? ThemeMode.dark : ThemeMode.light;
 
   runApp(const MyLibraryApp());
 }
 
-class MyLibraryApp extends StatelessWidget {
+// We made this a StatefulWidget to preserve the Auth Stream!
+class MyLibraryApp extends StatefulWidget {
   const MyLibraryApp({super.key});
+
+  @override
+  State<MyLibraryApp> createState() => _MyLibraryAppState();
+}
+
+class _MyLibraryAppState extends State<MyLibraryApp> {
+  // We store the auth stream here so it doesn't recreate on theme change
+  late final Stream<User?> _authStream;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize the stream only ONCE
+    _authStream = FirebaseAuth.instance.authStateChanges();
+    
+    // Initialize push notifications when the app starts
+    PushNotificationService.init();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -43,7 +60,8 @@ class MyLibraryApp extends StatelessWidget {
       valueListenable: themeNotifier,
       builder: (_, ThemeMode currentMode, __) {
         return MaterialApp(
-          title: 'Personal Library',
+          debugShowCheckedModeBanner: false, 
+          title: 'Folio',
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
             useMaterial3: true,
@@ -55,21 +73,19 @@ class MyLibraryApp extends StatelessWidget {
             ),
           ),
           themeMode: currentMode,
-          // Use StreamBuilder to check authentication state
+          
           home: StreamBuilder<User?>(
-            stream: FirebaseAuth.instance.authStateChanges(),
+            // Use the stored stream instead of calling the method again!
+            stream: _authStream, 
             builder: (context, snapshot) {
-              // Show a loading spinner while checking auth state
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Scaffold(
                   body: Center(child: CircularProgressIndicator()),
                 );
               }
-              // If we have data, the user is logged in!
               if (snapshot.hasData) {
-                return const HomeScreen();
+                return const MainNavigation();
               }
-              // Otherwise, they are NOT logged in, show the login/register screen
               return const AuthScreen();
             },
           ),

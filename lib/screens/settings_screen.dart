@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; 
 import '../main.dart';
 import '../services/export_service.dart';
 
@@ -33,8 +34,42 @@ class _P {
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
-class SettingsScreen extends StatelessWidget {
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool _isPrivate = false;
+  final user = FirebaseAuth.instance.currentUser;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrivacySetting();
+  }
+
+  Future<void> _loadPrivacySetting() async {
+    if (user != null) {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(user!.uid).get();
+      if (doc.exists && mounted) {
+        setState(() {
+          _isPrivate = doc.data()?['isPrivate'] ?? false;
+        });
+      }
+    }
+  }
+
+  Future<void> _togglePrivacy(bool value) async {
+    setState(() => _isPrivate = value);
+    if (user != null) {
+      await FirebaseFirestore.instance.collection('users').doc(user!.uid).set({
+        'isPrivate': value,
+      }, SetOptions(merge: true));
+    }
+  }
 
   void _snack(BuildContext context, String msg, _P p) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -44,24 +79,104 @@ class SettingsScreen extends StatelessWidget {
       margin: const EdgeInsets.all(16)));
   }
 
+  // ─── Logout Confirmation ───
+  Future<void> _confirmLogout(_P p) async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: p.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Log out?', 
+          style: TextStyle(color: p.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
+        content: Text('Are you sure you want to log out of your account?', 
+          style: TextStyle(color: p.textSecondary, fontSize: 14, height: 1.4)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel', style: TextStyle(color: p.textSecondary, fontWeight: FontWeight.w500)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Log Out', style: TextStyle(color: _K.red, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout == true) {
+      await FirebaseAuth.instance.signOut();
+      if (mounted) Navigator.pop(context); // Pop settings screen
+    }
+  }
+
+  // ─── NEW: Delete Account Confirmation ───
+  Future<void> _confirmDeleteAccount(_P p) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: p.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Delete Account?', 
+          style: TextStyle(color: p.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
+        content: Text('This action cannot be undone. All your profile data, library, and settings will be permanently removed.', 
+          style: TextStyle(color: p.textSecondary, fontSize: 14, height: 1.4)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel', style: TextStyle(color: p.textSecondary, fontWeight: FontWeight.w500)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete', style: TextStyle(color: _K.red, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldDelete == true && user != null) {
+      try {
+        // 1. Delete from Firestore first
+        await FirebaseFirestore.instance.collection('users').doc(user!.uid).delete();
+        
+        // 2. Delete from Authentication
+        await user!.delete();
+        
+        if (mounted) {
+          Navigator.pop(context); // Pop settings screen, auth state listener should handle routing to login
+        }
+      } catch (e) {
+        debugPrint('Error deleting account: $e');
+        if (mounted) {
+          _snack(context, 'Failed to delete account. Please log out and log back in to verify your identity before deleting.', p);
+        }
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final bool canPop = Navigator.of(context).canPop();
+
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: themeNotifier,
       builder: (_, ThemeMode currentMode, __) {
         final isDark = currentMode == ThemeMode.dark;
         final p = isDark ? _P.dark() : _P.light();
-        final user = FirebaseAuth.instance.currentUser;
 
         return Scaffold(
           backgroundColor: p.bg,
           appBar: AppBar(
-            backgroundColor: p.bg, elevation: 0,
+            backgroundColor: p.bg,
+            elevation: 0,
             surfaceTintColor: Colors.transparent,
-            leading: IconButton(
-              icon: Icon(Icons.arrow_back_ios_new_rounded,
-                  color: p.textSecondary, size: 18),
-              onPressed: () => Navigator.pop(context)),
+            automaticallyImplyLeading: canPop,
+            leading: canPop
+              ? IconButton(
+                  icon: Icon(Icons.arrow_back_ios_new_rounded,
+                      color: p.textSecondary, size: 18),
+                  onPressed: () => Navigator.pop(context))
+              : null,
+            centerTitle: true,
             title: Row(
               crossAxisAlignment: CrossAxisAlignment.baseline,
               textBaseline: TextBaseline.alphabetic,
@@ -75,113 +190,102 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
           body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 48),
             children: [
 
               // ── ACCOUNT ─────────────────────────────────────────────
               if (user != null) ...[
-                _Label('ACCOUNT', p),
-                const SizedBox(height: 8),
-                // User email card
-                _Card(p: p, child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 14),
-                  child: Row(children: [
-                    Container(
-                      width: 36, height: 36,
-                      decoration: BoxDecoration(
-                        color: _K.accentDim,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                            color: _K.accent.withOpacity(0.3))),
-                      child: const Icon(Icons.person_outline_rounded,
-                          color: _K.accent, size: 18)),
-                    const SizedBox(width: 12),
-                    Expanded(child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Signed in as',
-                          style: TextStyle(color: p.textMuted,
-                            fontSize: 10, fontWeight: FontWeight.w600,
-                            letterSpacing: 0.5)),
-                        const SizedBox(height: 2),
-                        Text(user.email ?? 'Unknown',
-                          style: TextStyle(color: p.textPrimary,
-                            fontSize: 13, fontWeight: FontWeight.w500),
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      ])),
-                  ]))),
-                const SizedBox(height: 8),
-                // Sign out — separate card so it stands out
-                _Card(p: p, child: _Tile(
-                  p: p,
-                  icon: Icons.logout_rounded,
-                  iconColor: _K.red,
-                  title: 'Sign Out',
-                  subtitle: 'Log out of your account on this device',
-                  titleColor: _K.red,
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await FirebaseAuth.instance.signOut();
-                  },
-                )),
-                const SizedBox(height: 24),
+                _SectionLabel('ACCOUNT', p),
+                _Card(p: p, child: Column(children: [
+
+                  // Email row
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+                    child: Row(children: [
+                      SizedBox(width: 20, child: Icon(Icons.person_outline_rounded, color: _K.accent, size: 20)),
+                      const SizedBox(width: 13),
+                      Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Signed in as',
+                            style: TextStyle(color: p.textMuted,
+                              fontSize: 11, fontWeight: FontWeight.w500,
+                              letterSpacing: 0.3)),
+                          const SizedBox(height: 2),
+                          Text(user!.email ?? 'Unknown',
+                            style: TextStyle(color: p.textPrimary,
+                              fontSize: 13, fontWeight: FontWeight.w500),
+                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ])),
+                    ])),
+
+                  _Divider(p),
+
+                  // Private Account toggle
+                  _ToggleTile(
+                    p: p,
+                    icon: Icons.lock_outline_rounded,
+                    iconColor: p.textSecondary,
+                    title: 'Private Account',
+                    subtitle: 'Only approved followers see your library',
+                    value: _isPrivate,
+                    onChanged: _togglePrivacy,
+                  ),
+
+                  _Divider(p),
+
+                  // Sign Out
+                  _TapTile(
+                    p: p,
+                    icon: Icons.logout_rounded,
+                    iconColor: _K.red,
+                    title: 'Sign Out',
+                    subtitle: 'Log out of your account on this device',
+                    titleColor: _K.red,
+                    showChevron: false,
+                    onTap: () => _confirmLogout(p), 
+                  ),
+
+                  _Divider(p),
+
+                  // Delete Account
+                  _TapTile(
+                    p: p,
+                    icon: Icons.person_remove_rounded,
+                    iconColor: _K.red,
+                    title: 'Delete Account',
+                    subtitle: 'Permanently remove your account & data',
+                    titleColor: _K.red,
+                    showChevron: false,
+                    onTap: () => _confirmDeleteAccount(p), 
+                  ),
+                ])),
+                const SizedBox(height: 28),
               ],
 
               // ── APPEARANCE ──────────────────────────────────────────
-              _Label('APPEARANCE', p),
-              const SizedBox(height: 8),
-              _Card(p: p, child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 14),
-                child: Row(children: [
-                  Icon(
-                    isDark
-                        ? Icons.dark_mode_rounded
-                        : Icons.light_mode_rounded,
-                    color: isDark ? _K.accent : p.textSecondary,
-                    size: 20),
-                  const SizedBox(width: 14),
-                  Expanded(child: Text('Dark Mode',
-                    style: TextStyle(color: p.textPrimary,
-                      fontSize: 14, fontWeight: FontWeight.w500))),
-                  // Animated toggle
-                  GestureDetector(
-                    onTap: () async {
-                      themeNotifier.value =
-                          isDark ? ThemeMode.light : ThemeMode.dark;
-                      final prefs = await SharedPreferences.getInstance();
-                      await prefs.setBool('isDarkMode', !isDark);
-                    },
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 220),
-                      width: 44, height: 24,
-                      decoration: BoxDecoration(
-                        color: isDark ? _K.accent : p.surfaceEl,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: isDark ? _K.accent : p.border)),
-                      child: AnimatedAlign(
-                        duration: const Duration(milliseconds: 220),
-                        alignment: isDark
-                            ? Alignment.centerRight
-                            : Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.all(3),
-                          width: 16, height: 16,
-                          decoration: BoxDecoration(
-                            color: isDark
-                                ? Colors.black87
-                                : p.textMuted,
-                            shape: BoxShape.circle))))),
-                ]))),
-              const SizedBox(height: 24),
+              _SectionLabel('APPEARANCE', p),
+              _Card(p: p, child: _ToggleTile(
+                p: p,
+                icon: isDark
+                    ? Icons.dark_mode_rounded
+                    : Icons.light_mode_rounded,
+                iconColor: isDark ? _K.accent : p.textSecondary,
+                title: 'Dark Mode',
+                subtitle: isDark ? 'Currently using dark theme' : 'Currently using light theme',
+                value: isDark,
+                onChanged: (val) async {
+                  themeNotifier.value = val ? ThemeMode.dark : ThemeMode.light;
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setBool('isDarkMode', val);
+                },
+              )),
+              const SizedBox(height: 28),
 
               // ── DATA & BACKUPS ──────────────────────────────────────
-              _Label('DATA & BACKUPS', p),
-              const SizedBox(height: 8),
+              _SectionLabel('DATA & BACKUPS (IN DEVELOPMENT)', p),
               _Card(p: p, child: Column(children: [
-                _Tile(
+                _TapTile(
                   p: p,
                   icon: Icons.ios_share_rounded,
                   iconColor: _K.blue,
@@ -192,7 +296,7 @@ class SettingsScreen extends StatelessWidget {
                     await ExportService.shareLibraryCsv();
                   }),
                 _Divider(p),
-                _Tile(
+                _TapTile(
                   p: p,
                   icon: Icons.download_rounded,
                   iconColor: _K.accent,
@@ -205,7 +309,7 @@ class SettingsScreen extends StatelessWidget {
                     _snack(context, 'Saved successfully!', p);
                   }),
                 _Divider(p),
-                _Tile(
+                _TapTile(
                   p: p,
                   icon: Icons.upload_file_rounded,
                   iconColor: _K.orange,
@@ -219,34 +323,30 @@ class SettingsScreen extends StatelessWidget {
                         ok ? 'Library restored!' : 'Import canceled or failed.', p);
                   }),
               ])),
-              const SizedBox(height: 24),
+              const SizedBox(height: 28),
 
               // ── ABOUT ────────────────────────────────────────────────
-              _Label('ABOUT', p),
-              const SizedBox(height: 8),
+              _SectionLabel('ABOUT', p),
               _Card(p: p, child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
                 child: Row(children: [
-                  Icon(Icons.info_outline_rounded,
-                      color: p.textSecondary, size: 20),
-                  const SizedBox(width: 14),
+                  SizedBox(width: 20, child: Icon(Icons.info_outline_rounded, color: p.textSecondary, size: 20)),
+                  const SizedBox(width: 13),
                   Expanded(child: Text('Version',
                     style: TextStyle(color: p.textPrimary,
                       fontSize: 14, fontWeight: FontWeight.w500))),
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 9, vertical: 3),
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                     decoration: BoxDecoration(
                       color: p.surfaceEl,
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: BorderRadius.circular(7),
                       border: Border.all(color: p.border)),
                     child: Text('1.0.0.0',
                       style: TextStyle(color: p.textMuted,
                         fontSize: 12, fontWeight: FontWeight.w500,
                         letterSpacing: 0.3))),
                 ]))),
-              const SizedBox(height: 40),
+              const SizedBox(height: 48),
 
               // ── Footer ───────────────────────────────────────────────
               Center(child: Column(children: [
@@ -272,49 +372,86 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
-// ─── Widgets ──────────────────────────────────────────────────────────────────
+// ─── Shared Widgets ───────────────────────────────────────────────────────────
 
-class _Label extends StatelessWidget {
-  final String text; final _P p;
-  const _Label(this.text, this.p);
-  @override
-  Widget build(BuildContext context) => Text(text,
-    style: TextStyle(color: p.textMuted, fontSize: 10,
-      fontWeight: FontWeight.w700, letterSpacing: 2));
-}
-
-class _Card extends StatelessWidget {
-  final Widget child; final _P p;
-  const _Card({required this.child, required this.p});
-  @override
-  Widget build(BuildContext context) => Container(
-    decoration: BoxDecoration(color: p.surface,
-      borderRadius: BorderRadius.circular(13),
-      border: Border.all(color: p.border)),
-    child: child);
-}
-
-class _Divider extends StatelessWidget {
+/// Uniform custom toggle — identical look for both dark mode & private account.
+class _CustomToggle extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool> onChanged;
   final _P p;
-  const _Divider(this.p);
+  const _CustomToggle({
+    required this.value, required this.onChanged, required this.p});
+
   @override
-  Widget build(BuildContext context) => Container(
-    margin: const EdgeInsets.only(left: 50),
-    height: 1, color: p.divider);
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: () => onChanged(!value),
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      width: 44, height: 25,
+      decoration: BoxDecoration(
+        color: value ? _K.accent : p.surfaceEl,
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(
+          color: value ? _K.accent : p.border, width: 1)),
+      child: AnimatedAlign(
+        duration: const Duration(milliseconds: 220),
+        alignment: value ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: const EdgeInsets.all(3),
+          width: 17, height: 17,
+          decoration: BoxDecoration(
+            color: value ? Colors.black.withOpacity(0.75) : p.textMuted,
+            shape: BoxShape.circle)))));
 }
 
-class _Tile extends StatelessWidget {
+/// A row with a toggle — no chevron.
+class _ToggleTile extends StatelessWidget {
+  final _P p;
+  final IconData icon;
+  final Color iconColor;
+  final String title, subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _ToggleTile({
+    required this.p, required this.icon, required this.iconColor,
+    required this.title, required this.subtitle,
+    required this.value, required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+    child: Row(children: [
+      SizedBox(width: 20, child: Icon(icon, color: iconColor, size: 20)),
+      const SizedBox(width: 13),
+      Expanded(child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyle(color: p.textPrimary,
+            fontSize: 14, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 2),
+          Text(subtitle, style: TextStyle(color: p.textMuted, fontSize: 11)),
+        ])),
+      const SizedBox(width: 12),
+      _CustomToggle(value: value, onChanged: onChanged, p: p),
+    ]));
+}
+
+/// A tappable row — optionally shows chevron.
+class _TapTile extends StatelessWidget {
   final _P p;
   final IconData icon;
   final Color iconColor;
   final String title, subtitle;
   final Color? titleColor;
+  final bool showChevron;
   final VoidCallback onTap;
 
-  const _Tile({
+  const _TapTile({
     required this.p, required this.icon, required this.iconColor,
     required this.title, required this.subtitle, required this.onTap,
-    this.titleColor,
+    this.titleColor, this.showChevron = true,
   });
 
   @override
@@ -324,12 +461,12 @@ class _Tile extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(13),
       splashColor: iconColor.withOpacity(0.06),
-      highlightColor: p.surfaceEl,
+      highlightColor: p.surfaceEl.withOpacity(0.5),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
         child: Row(children: [
-          Icon(icon, color: iconColor, size: 20),
-          const SizedBox(width: 14),
+          SizedBox(width: 20, child: Icon(icon, color: iconColor, size: 20)),
+          const SizedBox(width: 13),
           Expanded(child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -338,8 +475,49 @@ class _Tile extends StatelessWidget {
                 fontSize: 14, fontWeight: FontWeight.w500)),
               const SizedBox(height: 2),
               Text(subtitle,
-                style: TextStyle(color: p.textMuted, fontSize: 12)),
+                style: TextStyle(color: p.textMuted, fontSize: 11)),
             ])),
-          Icon(Icons.chevron_right_rounded, color: p.textMuted, size: 15),
+          if (showChevron)
+            Icon(Icons.chevron_right_rounded, color: p.textMuted, size: 16),
         ]))));
+}
+
+// ─── Layout Primitives ────────────────────────────────────────────────────────
+
+class _SectionLabel extends StatelessWidget {
+  final String text; final _P p;
+  const _SectionLabel(this.text, this.p);
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(left: 4, bottom: 8),
+    child: Text(text,
+      style: TextStyle(color: p.textMuted, fontSize: 10,
+        fontWeight: FontWeight.w700, letterSpacing: 1.8)));
+}
+
+class _Card extends StatelessWidget {
+  final Widget child; final _P p;
+  const _Card({required this.child, required this.p});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    decoration: BoxDecoration(
+      color: p.surface,
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: p.border, width: 0.8)),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: child));
+}
+
+class _Divider extends StatelessWidget {
+  final _P p;
+  const _Divider(this.p);
+
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(left: 49),
+    height: 0.5,
+    color: p.divider);
 }

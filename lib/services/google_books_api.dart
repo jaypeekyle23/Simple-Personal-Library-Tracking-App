@@ -1,11 +1,9 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-// 1. ADD THIS IMPORT:
 import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 
 class GoogleBooksApi {
-  // 2. CHANGE THIS LINE: 
-  // It no longer has your real key. It securely fetches it from the hidden .env file!
+
   static String get _apiKey => dotenv.env['BOOKS_API_KEY'] ?? ''; 
 
   static Future<List<Map<String, dynamic>>> searchBooks(String query) async {

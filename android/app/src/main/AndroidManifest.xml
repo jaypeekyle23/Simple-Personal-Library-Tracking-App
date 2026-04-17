@@ -5,9 +5,9 @@
     <uses-permission android:name="android.permission.CAMERA"/>
     
     <application
-        android:label="my_library_tracker"
+        android:label="Folio"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/launcher_icon">
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -1,604 +1,375 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart'; // NEW IMPORT
 import '../main.dart';
-import '../models/book.dart';
-import 'add_book_screen.dart';
-import 'settings_screen.dart';
-
-// ─── Sort options ─────────────────────────────────────────────────────────────
-
-enum SortOption { titleAsc, datePubAsc, datePubDesc, pagesAsc, pagesDesc }
-
-extension SortOptionExtension on SortOption {
-  String get displayName {
-    switch (this) {
-      case SortOption.titleAsc:    return 'A-Z (Title)';
-      case SortOption.datePubAsc:  return 'Date (Old→New)';
-      case SortOption.datePubDesc: return 'Date (New→Old)';
-      case SortOption.pagesAsc:    return 'Pages (Asc)';
-      case SortOption.pagesDesc:   return 'Pages (Desc)';
-    }
-  }
-}
+import 'view_profile_screen.dart';
+import 'notifications_screen.dart';
+import 'inbox_screen.dart';
+import 'user_search_screen.dart';
 
 // ─── Palette ─────────────────────────────────────────────────────────────────
-
 class _K {
-  static const accent       = Color(0xFF00C030);
-  static const accentDim    = Color(0xFF00C03028);
-  static const statusRead   = Color(0xFF4A9EFF);
-  static const statusReadBg = Color(0xFF4A9EFF20);
-  static const statusWant   = Color(0xFFFFA040);
-  static const statusWantBg = Color(0xFFFFA04020);
-  static const statusDnf    = Color(0xFFFF5555);
-  static const statusDnfBg  = Color(0xFFFF555520);
-  static const danger       = Color(0xFFFF3B30);
+  static const accent = Color(0xFF00C030);
+  static const danger = Color(0xFFFF3B30);
+  static const amber  = Color(0xFFFFB800);
 }
 
 class _P {
   final Color bg, surface, surfaceEl, border, divider,
       textPrimary, textSecondary, textMuted;
-  const _P({
-    required this.bg, required this.surface, required this.surfaceEl,
+  const _P({required this.bg, required this.surface, required this.surfaceEl,
     required this.border, required this.divider, required this.textPrimary,
-    required this.textSecondary, required this.textMuted,
-  });
+    required this.textSecondary, required this.textMuted});
   factory _P.dark() => const _P(
     bg: Color(0xFF0F1117), surface: Color(0xFF1A1D27),
     surfaceEl: Color(0xFF22263A), border: Color(0xFF2A2F45),
     divider: Color(0xFF252A3D), textPrimary: Color(0xFFEEEEEE),
-    textSecondary: Color(0xFF8A8FA8), textMuted: Color(0xFF4A5068),
-  );
+    textSecondary: Color(0xFF8A8FA8), textMuted: Color(0xFF4A5068));
   factory _P.light() => const _P(
     bg: Color(0xFFF4F5F7), surface: Color(0xFFFFFFFF),
     surfaceEl: Color(0xFFEEF0F4), border: Color(0xFFDDE0E8),
     divider: Color(0xFFE8EAF0), textPrimary: Color(0xFF0F1117),
-    textSecondary: Color(0xFF5A6070), textMuted: Color(0xFF9AA0B0),
-  );
-}
-
-Color _statusColor(ReadingStatus s) {
-  switch (s) {
-    case ReadingStatus.currentlyReading: return _K.accent;
-    case ReadingStatus.read:             return _K.statusRead;
-    case ReadingStatus.planToRead:       return _K.statusWant;
-    default:                             return _K.statusDnf;
-  }
+    textSecondary: Color(0xFF5A6070), textMuted: Color(0xFF9AA0B0));
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
-
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
-  List<Book> _books = [];
-  final _searchController = TextEditingController();
-  SortOption _selectedSort = SortOption.titleAsc;
-  ReadingStatus? _selectedFilter;
-  Map<ReadingStatus?, int> _statusCounts = {null: 0};
-  bool _showFilters = false;
-  late final AnimationController _filterAnimController;
-  late final Animation<double> _filterAnim;
+class _HomeScreenState extends State<HomeScreen> {
+  final currentUser = FirebaseAuth.instance.currentUser;
+  List<String> _followingIds = [];
+  StreamSubscription<DocumentSnapshot>? _userSubscription;
 
   @override
   void initState() {
     super.initState();
-    _filterAnimController = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 240));
-    _filterAnim = CurvedAnimation(
-        parent: _filterAnimController, curve: Curves.easeInOut);
-    _fetchBooks();
+    _listenToFollowingList();
+    _setupPushNotifications(); // NEW FUNCTION CALL
   }
 
-  void _showSnack(String msg, _P p) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg, style: TextStyle(color: p.textPrimary, fontSize: 13)),
-      backgroundColor: p.surfaceEl,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      margin: const EdgeInsets.all(16),
-    ));
+  // NEW FUNCTION: Request push notification permission and save token
+  Future<void> _setupPushNotifications() async {
+    if (currentUser == null) return;
+    
+    FirebaseMessaging messaging = FirebaseMessaging.instance;
+    
+    // Request permission (Shows the popup on iOS/Android)
+    NotificationSettings settings = await messaging.requestPermission();
+    
+    if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+      // Get the unique token for this specific physical phone
+      String? token = await messaging.getToken();
+      
+      // Save it to their user document in Firestore
+      if (token != null) {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(currentUser!.uid)
+            .update({'fcmToken': token});
+      }
+    }
   }
 
-  Future<void> _fetchBooks() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final snapshot = await FirebaseFirestore.instance
-        .collection('users').doc(user.uid).collection('books').get();
-    List<Book> baseBooks =
-        snapshot.docs.map((d) => Book.fromMap(d.data(), d.id)).toList();
-
-    final query = _searchController.text.toLowerCase().trim();
-    if (query.isNotEmpty) {
-      baseBooks = baseBooks.where((b) {
-        final t = b.title?.toLowerCase() ?? '';
-        final a = b.author?.toLowerCase() ?? '';
-        final g = b.genres?.join(' ').toLowerCase() ?? '';
-        return t.contains(query) || a.contains(query) || g.contains(query);
-      }).toList();
-    }
-
-    Map<ReadingStatus?, int> newCounts = {null: baseBooks.length};
-    for (var s in ReadingStatus.values) {
-      newCounts[s] = baseBooks.where((b) => b.status == s).length;
-    }
-
-    List<Book> filtered = baseBooks;
-    if (_selectedFilter != null) {
-      filtered = filtered.where((b) => b.status == _selectedFilter).toList();
-    }
-
-    filtered.sort((a, b) {
-      if (a.status == ReadingStatus.currentlyReading &&
-          b.status != ReadingStatus.currentlyReading) return -1;
-      if (b.status == ReadingStatus.currentlyReading &&
-          a.status != ReadingStatus.currentlyReading) return 1;
-      switch (_selectedSort) {
-        case SortOption.titleAsc:    return (a.title ?? '').compareTo(b.title ?? '');
-        case SortOption.datePubAsc:  return (a.datePublished ?? '').compareTo(b.datePublished ?? '');
-        case SortOption.datePubDesc: return (b.datePublished ?? '').compareTo(a.datePublished ?? '');
-        case SortOption.pagesAsc:    return (a.totalPages ?? 0).compareTo(b.totalPages ?? 0);
-        case SortOption.pagesDesc:   return (b.totalPages ?? 0).compareTo(a.totalPages ?? 0);
+  void _listenToFollowingList() {
+    if (currentUser == null) return;
+    _userSubscription = FirebaseFirestore.instance
+        .collection('users').doc(currentUser!.uid).snapshots().listen((doc) {
+      if (doc.exists && mounted) {
+        setState(() => _followingIds =
+            List<String>.from(doc.data()?['following'] ?? []));
       }
     });
-
-    setState(() { _books = filtered; _statusCounts = newCounts; });
-  }
-
-  Future<void> _deleteBook(String id) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      await FirebaseFirestore.instance
-          .collection('users').doc(user.uid).collection('books').doc(id).delete();
-      _fetchBooks();
-    }
-  }
-
-  void _toggleFilters() {
-    setState(() => _showFilters = !_showFilters);
-    _showFilters ? _filterAnimController.forward() : _filterAnimController.reverse();
   }
 
   @override
   void dispose() {
-    _searchController.dispose();
-    _filterAnimController.dispose();
+    _userSubscription?.cancel();
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: themeNotifier,
-      builder: (_, ThemeMode mode, __) {
-        final p = mode == ThemeMode.dark ? _P.dark() : _P.light();
-        return _HomeView(
-          p: p, books: _books, statusCounts: _statusCounts,
-          selectedSort: _selectedSort, selectedFilter: _selectedFilter,
-          showFilters: _showFilters, filterAnim: _filterAnim,
-          searchController: _searchController,
-          onToggleFilters: _toggleFilters,
-          onSortChanged: (s) { setState(() => _selectedSort = s); _fetchBooks(); },
-          onFilterChanged: (f) { setState(() => _selectedFilter = f); _fetchBooks(); },
-          onSearchChanged: (_) => _fetchBooks(),
-          onSearchCleared: () { _searchController.clear(); _fetchBooks(); },
-          onBookTap: (book) async {
-            final result = await Navigator.push(context,
-                MaterialPageRoute(builder: (_) => AddBookScreen(book: book)));
-            if (result == true) _showSnack('Book updated!', p);
-            _fetchBooks();
-          },
-          onBookDelete: (id) { _deleteBook(id); _showSnack('Book deleted.', p); },
-          onAddBook: () async {
-            final result = await Navigator.push(context,
-                MaterialPageRoute(builder: (_) => const AddBookScreen()));
-            if (result == true) _showSnack('Book added!', p);
-            _fetchBooks();
-          },
-          onSettings: () => Navigator.push(context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen())),
-        );
-      },
-    );
-  }
-}
-
-// ─── Pure UI ──────────────────────────────────────────────────────────────────
-
-class _HomeView extends StatelessWidget {
-  final _P p;
-  final List<Book> books;
-  final Map<ReadingStatus?, int> statusCounts;
-  final SortOption selectedSort;
-  final ReadingStatus? selectedFilter;
-  final bool showFilters;
-  final Animation<double> filterAnim;
-  final TextEditingController searchController;
-  final VoidCallback onToggleFilters;
-  final void Function(SortOption) onSortChanged;
-  final void Function(ReadingStatus?) onFilterChanged;
-  final void Function(String) onSearchChanged;
-  final VoidCallback onSearchCleared;
-  final void Function(Book) onBookTap;
-  final void Function(String) onBookDelete;
-  final VoidCallback onAddBook;
-  final VoidCallback onSettings;
-
-  const _HomeView({
-    required this.p, required this.books, required this.statusCounts,
-    required this.selectedSort, required this.selectedFilter,
-    required this.showFilters, required this.filterAnim,
-    required this.searchController, required this.onToggleFilters,
-    required this.onSortChanged, required this.onFilterChanged,
-    required this.onSearchChanged, required this.onSearchCleared,
-    required this.onBookTap, required this.onBookDelete,
-    required this.onAddBook, required this.onSettings,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: p.bg,
-      body: NestedScrollView(
-        headerSliverBuilder: (ctx, __) => [_buildAppBar(ctx)],
-        body: Column(children: [
-          _buildSearchBar(),
-          _buildFilterBar(),
-          SizeTransition(sizeFactor: filterAnim, child: _buildSortPanel()),
-          _buildCountRow(),
-          Expanded(child: _buildBookList(context)),
-        ]),
-      ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: _K.accent,
-        foregroundColor: Colors.black,
-        elevation: 4,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        onPressed: onAddBook,
-        child: const Icon(Icons.add_rounded, size: 26),
-      ),
-    );
+  String _timeAgo(Timestamp? ts) {
+    if (ts == null) return 'Just now';
+    final d = DateTime.now().difference(ts.toDate());
+    if (d.inDays > 365) return '${(d.inDays / 365).floor()}y';
+    if (d.inDays > 30)  return '${(d.inDays / 30).floor()}mo';
+    if (d.inDays > 0)   return '${d.inDays}d';
+    if (d.inHours > 0)  return '${d.inHours}h';
+    if (d.inMinutes > 0) return '${d.inMinutes}m';
+    return 'Just now';
   }
 
-  // ── AppBar ──────────────────────────────────────────────────────────────────
-
-  Widget _buildAppBar(BuildContext context) {
-    return SliverAppBar(
-      expandedHeight: 108,
-      floating: true, snap: true, pinned: false,
-      backgroundColor: p.bg,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      actions: [
-        // Logout
-        _NavBtn(
-          icon: Icons.logout_rounded,
-          color: p.textSecondary,
-          onTap: () => _showLogoutDialog(context),
-        ),
-        const SizedBox(width: 4),
-        // Settings
-        _NavBtn(
-          icon: Icons.settings_outlined,
-          color: p.textSecondary,
-          onTap: onSettings,
-        ),
-        const SizedBox(width: 8),
-      ],
-      flexibleSpace: FlexibleSpaceBar(
-        titlePadding: const EdgeInsets.only(left: 20, bottom: 14),
-        title: Column(
-          mainAxisAlignment: MainAxisAlignment.end,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Folio wordmark
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Folio',
-                    style: TextStyle(
-                      color: p.textPrimary, fontSize: 26,
-                      fontWeight: FontWeight.w300, letterSpacing: -1.2, height: 1,
-                    )),
-                Text('.',
-                    style: const TextStyle(
-                      color: _K.accent, fontSize: 26,
-                      fontWeight: FontWeight.w700, height: 1,
-                    )),
-              ],
-            ),
-            const SizedBox(height: 1),
-            Text('YOUR LIBRARY',
-                style: TextStyle(
-                  color: p.textMuted, fontSize: 8.5,
-                  fontWeight: FontWeight.w700, letterSpacing: 2.5,
-                )),
-          ],
-        ),
-      ),
-    );
+  Future<void> _clearNotifications() async {
+    if (currentUser == null) return;
+    try {
+      final batch = FirebaseFirestore.instance.batch();
+      final unread = await FirebaseFirestore.instance
+          .collection('users').doc(currentUser!.uid)
+          .collection('notifications')
+          .where('isRead', isEqualTo: false).get();
+      for (var doc in unread.docs) {
+        batch.update(doc.reference, {'isRead': true});
+      }
+      await batch.commit();
+    } catch (e) { debugPrint('Error clearing notifications: $e'); }
   }
 
-  void _showLogoutDialog(BuildContext context) {
-    final isDark = p.bg == const Color(0xFF0F1117);
-    showDialog(
-      context: context,
-      builder: (_) => _StyledDialog(
-        p: p,
-        isDark: isDark,
-        title: 'Sign out',
-        body: 'Are you sure you want to sign out of Folio?',
-        cancelLabel: 'Cancel',
-        confirmLabel: 'Sign out',
-        confirmColor: _K.danger,
-        onConfirm: () async {
-          Navigator.of(context).pop();
-          await FirebaseAuth.instance.signOut();
-        },
-      ),
-    );
-  }
-
-  // ── Search ──────────────────────────────────────────────────────────────────
-
-  Widget _buildSearchBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
-      child: Container(
-        height: 42,
-        decoration: BoxDecoration(
-          color: p.surface,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: p.border),
-        ),
-        child: TextField(
-          controller: searchController,
-          style: TextStyle(color: p.textPrimary, fontSize: 14),
-          cursorColor: _K.accent,
-          decoration: InputDecoration(
-            hintText: 'Search title, author, tag…',
-            hintStyle: TextStyle(color: p.textMuted, fontSize: 14),
-            prefixIcon: Icon(Icons.search_rounded, color: p.textMuted, size: 19),
-            suffixIcon: searchController.text.isNotEmpty
-                ? GestureDetector(
-                    onTap: onSearchCleared,
-                    child: Icon(Icons.close_rounded, color: p.textMuted, size: 17))
-                : null,
-            border: InputBorder.none,
-            contentPadding: const EdgeInsets.symmetric(vertical: 12),
-          ),
-          onChanged: onSearchChanged,
-        ),
-      ),
-    );
-  }
-
-  // ── Filter chips ────────────────────────────────────────────────────────────
-
-  Widget _buildFilterBar() {
-    return SizedBox(
-      height: 34,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        children: [
-          _FilterChip(p: p, label: 'All', count: statusCounts[null] ?? 0,
-              isSelected: selectedFilter == null,
-              onTap: () => onFilterChanged(null)),
-          ...ReadingStatus.values.map((s) => _FilterChip(
-              p: p, label: s.displayName,
-              count: statusCounts[s] ?? 0,
-              isSelected: selectedFilter == s,
-              color: _statusColor(s),
-              onTap: () => onFilterChanged(s))),
-          const SizedBox(width: 6),
-          _SortToggle(p: p, active: showFilters, onTap: onToggleFilters),
-        ],
-      ),
-    );
-  }
-
-  // ── Sort panel ──────────────────────────────────────────────────────────────
-
-  Widget _buildSortPanel() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: BoxDecoration(
-        color: p.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: p.border),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('SORT BY', style: TextStyle(
-          color: p.textMuted, fontSize: 9,
-          fontWeight: FontWeight.w700, letterSpacing: 2,
-        )),
-        const SizedBox(height: 10),
-        Wrap(spacing: 7, runSpacing: 7,
-          children: SortOption.values.map((sort) {
-            final sel = selectedSort == sort;
-            return GestureDetector(
-              onTap: () => onSortChanged(sort),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-                decoration: BoxDecoration(
-                  color: sel ? _K.accent : p.surfaceEl,
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: sel ? _K.accent : p.border),
-                ),
-                child: Text(sort.displayName,
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                    color: sel ? Colors.black : p.textSecondary)),
-              ),
-            );
-          }).toList()),
-      ]),
-    );
-  }
-
-  // ── Count row ───────────────────────────────────────────────────────────────
-
-  Widget _buildCountRow() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-      child: Row(children: [
-        Text('${books.length} ${books.length == 1 ? 'BOOK' : 'BOOKS'}',
-          style: TextStyle(color: p.textMuted, fontSize: 9,
-            fontWeight: FontWeight.w700, letterSpacing: 2)),
-        const SizedBox(width: 10),
-        Expanded(child: Container(height: 1, color: p.divider)),
-      ]),
-    );
-  }
-
-  // ── Book list ───────────────────────────────────────────────────────────────
-
-  Widget _buildBookList(BuildContext context) {
-    if (books.isEmpty) {
-      return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.menu_book_outlined, size: 44, color: p.textMuted),
-        const SizedBox(height: 14),
-        Text('No books yet', style: TextStyle(
-            color: p.textSecondary, fontSize: 16, fontWeight: FontWeight.w300)),
-        const SizedBox(height: 5),
-        Text('Tap + to add your first book',
-            style: TextStyle(color: p.textMuted, fontSize: 13)),
-      ]));
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.only(top: 8, bottom: 100),
-      itemCount: books.length,
-      itemBuilder: (_, i) => _buildCard(context, books[i]),
-    );
-  }
-
-  // ── Book card ───────────────────────────────────────────────────────────────
-
-  Widget _buildCard(BuildContext context, Book book) {
-    double progress = 0.0;
-    String progressText = '';
-    if (book.status == ReadingStatus.currentlyReading) {
-      if (book.totalPages != null && book.totalPages! > 0) {
-        final cur = book.currentPage ?? 0;
-        progress = (cur / book.totalPages!).clamp(0.0, 1.0);
-        progressText = '$cur / ${book.totalPages}p';
-      } else if (book.readPercentage != null) {
-        progress = (book.readPercentage! / 100.0).clamp(0.0, 1.0);
-        progressText = '${book.readPercentage!.toStringAsFixed(0)}%';
+  Future<void> _toggleLike(String postId, List likes, String ownerId) async {
+    if (currentUser == null) return;
+    final uid = currentUser!.uid;
+    final ref = FirebaseFirestore.instance.collection('feed').doc(postId);
+    if (likes.contains(uid)) {
+      await ref.update({'likes': FieldValue.arrayRemove([uid])});
+      if (ownerId.isNotEmpty && ownerId != uid) {
+        try {
+          await FirebaseFirestore.instance.collection('users')
+              .doc(ownerId).collection('notifications')
+              .doc('${postId}_${uid}_like').delete();
+        } catch (e) { debugPrint('Notif: $e'); }
+      }
+    } else {
+      await ref.update({'likes': FieldValue.arrayUnion([uid])});
+      if (ownerId.isNotEmpty && ownerId != uid) {
+        try {
+          final me = await FirebaseFirestore.instance
+              .collection('users').doc(uid).get();
+          await FirebaseFirestore.instance.collection('users')
+              .doc(ownerId).collection('notifications')
+              .doc('${postId}_${uid}_like').set({
+            'type': 'like', 'senderId': uid,
+            'senderName': me.data()?['username'] ?? 'Someone',
+            'senderPic': me.data()?['profileImageUrl'] ?? '',
+            'postId': postId, 'isRead': false,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        } catch (e) { debugPrint('Notif: $e'); }
       }
     }
-    final sc = _statusColor(book.status);
+  }
 
-    return Dismissible(
-      key: ValueKey(book.id ?? UniqueKey().toString()),
-      direction: DismissDirection.endToStart,
-      confirmDismiss: (_) => showDialog<bool>(
-        context: context,
-        builder: (_) => _StyledDialog(
-          p: p,
-          isDark: p.bg == const Color(0xFF0F1117),
-          title: 'Delete book',
-          body: 'Remove "${book.title}" from your library?',
-          cancelLabel: 'Cancel',
-          confirmLabel: 'Delete',
-          confirmColor: _K.danger,
-          onConfirm: () => Navigator.of(context).pop(true),
-        ),
-      ),
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 22),
-        color: _K.danger,
-        child: const Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.delete_outline_rounded, color: Colors.white, size: 22),
-          SizedBox(height: 3),
-          Text('DELETE', style: TextStyle(color: Colors.white,
-              fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1.5)),
-        ]),
-      ),
-      onDismissed: (_) { if (book.id != null) onBookDelete(book.id!); },
-      child: GestureDetector(
-        onTap: () => onBookTap(book),
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          decoration: BoxDecoration(
-            color: p.surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: p.border),
-          ),
-          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            _buildCover(book),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Expanded(child: Text(book.title ?? 'Unknown Title',
-                        style: TextStyle(color: p.textPrimary, fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.2, height: 1.3),
-                        maxLines: 2, overflow: TextOverflow.ellipsis)),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: sc.withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(book.status.displayName,
-                          style: TextStyle(fontSize: 10,
-                              fontWeight: FontWeight.w500, color: sc)),
-                      ),
-                    ]),
-                    const SizedBox(height: 4),
-                    Text(book.author ?? 'Unknown Author',
-                      style: TextStyle(color: p.textSecondary, fontSize: 12),
-                      maxLines: 1, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 5),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: p.surfaceEl,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(book.format.displayName.toUpperCase(),
-                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
-                          color: p.textMuted, letterSpacing: 1)),
-                    ),
-                    if (book.status == ReadingStatus.currentlyReading &&
-                        progressText.isNotEmpty) ...[
-                      const SizedBox(height: 9),
-                      Row(children: [
-                        Expanded(child: ClipRRect(
-                          borderRadius: BorderRadius.circular(3),
-                          child: LinearProgressIndicator(
-                            value: progress, minHeight: 3,
-                            backgroundColor: p.divider,
-                            valueColor:
-                                const AlwaysStoppedAnimation(_K.accent)),
-                        )),
-                        const SizedBox(width: 7),
-                        Text(progressText,
-                          style: const TextStyle(fontSize: 10,
-                              fontWeight: FontWeight.w700, color: _K.accent)),
-                      ]),
-                    ],
-                  ],
-                ),
-              ),
+  // --- Toggle Comment Like ---
+  Future<void> _toggleCommentLike(String postId, String commentId, List likes, String commentOwnerId) async {
+    if (currentUser == null) return;
+    final uid = currentUser!.uid;
+    final ref = FirebaseFirestore.instance.collection('feed').doc(postId).collection('comments').doc(commentId);
+    
+    if (likes.contains(uid)) {
+      await ref.update({'likes': FieldValue.arrayRemove([uid])});
+      if (commentOwnerId.isNotEmpty && commentOwnerId != uid) {
+        try {
+          await FirebaseFirestore.instance.collection('users')
+              .doc(commentOwnerId).collection('notifications')
+              .doc('${commentId}_${uid}_commentlike').delete();
+        } catch (e) { debugPrint('Notif: $e'); }
+      }
+    } else {
+      await ref.update({'likes': FieldValue.arrayUnion([uid])});
+      if (commentOwnerId.isNotEmpty && commentOwnerId != uid) {
+        try {
+          final me = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+          await FirebaseFirestore.instance.collection('users')
+              .doc(commentOwnerId).collection('notifications')
+              .doc('${commentId}_${uid}_commentlike').set({
+            'type': 'comment_like', 'senderId': uid,
+            'senderName': me.data()?['username'] ?? 'Someone',
+            'senderPic': me.data()?['profileImageUrl'] ?? '',
+            'postId': postId, 'isRead': false,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        } catch (e) { debugPrint('Notif: $e'); }
+      }
+    }
+  }
+
+  void _showCommentsSheet(BuildContext ctx, String postId,
+      String postOwnerId, _P p) {
+    final ctrl = TextEditingController();
+    showModalBottomSheet(
+      context: ctx, isScrollControlled: true,
+      backgroundColor: p.bg,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetCtx) => Padding(
+        padding: EdgeInsets.only(
+            bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
+        child: SizedBox(
+          height: MediaQuery.of(sheetCtx).size.height * 0.75,
+          child: Column(children: [
+            const SizedBox(height: 12),
+            Container(width: 36, height: 4,
+              decoration: BoxDecoration(color: p.border,
+                  borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 14),
+            Text('Comments', style: TextStyle(color: p.textPrimary,
+                fontSize: 15, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            Container(height: 1, color: p.border),
+            Expanded(child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance.collection('feed')
+                  .doc(postId).collection('comments')
+                  .orderBy('createdAt').snapshots(),
+              builder: (_, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator(
+                      color: _K.accent, strokeWidth: 2.5));
+                }
+                final comments = snap.data?.docs ?? [];
+                if (comments.isEmpty) {
+                  return Center(child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.chat_bubble_outline_rounded,
+                          size: 36, color: p.textMuted),
+                      const SizedBox(height: 10),
+                      Text('No comments yet', style: TextStyle(
+                          color: p.textSecondary, fontSize: 14,
+                          fontWeight: FontWeight.w300)),
+                    ]));
+                }
+                return ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                  itemCount: comments.length,
+                  itemBuilder: (_, i) {
+                    final c = comments[i].data() as Map<String, dynamic>;
+                    final commentId = comments[i].id; // Needed for like/delete
+                    final pic = c['userPicUrl'] ?? '';
+                    final commentOwnerId = c['uid'] ?? '';
+                    
+                    // Comment Like data
+                    final List commentLikes = c['likes'] ?? [];
+                    final bool isCommentLiked = currentUser != null && commentLikes.contains(currentUser!.uid);
+                    
+                    // Can delete if they own the post OR they own the comment
+                    final bool canDelete = currentUser != null && (postOwnerId == currentUser!.uid || commentOwnerId == currentUser!.uid);
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Clickable Avatar
+                          GestureDetector(
+                            onTap: () {
+                              if (commentOwnerId.isNotEmpty) {
+                                Navigator.push(context, MaterialPageRoute(
+                                  builder: (_) => ViewProfileScreen(userId: commentOwnerId)));
+                              }
+                            },
+                            child: CircleAvatar(radius: 13,
+                              backgroundColor: p.surfaceEl,
+                              backgroundImage: pic.isNotEmpty ? NetworkImage(pic) : null,
+                              child: pic.isEmpty ? Icon(Icons.person, size: 13, color: p.textMuted) : null),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(children: [
+                                // Clickable Username
+                                GestureDetector(
+                                  onTap: () {
+                                    if (commentOwnerId.isNotEmpty) {
+                                      Navigator.push(context, MaterialPageRoute(
+                                        builder: (_) => ViewProfileScreen(userId: commentOwnerId)));
+                                    }
+                                  },
+                                  child: Text(c['username'] ?? 'User',
+                                    style: TextStyle(color: p.textPrimary, fontWeight: FontWeight.w600, fontSize: 12)),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(_timeAgo(c['createdAt'] as Timestamp?),
+                                  style: TextStyle(color: p.textMuted, fontSize: 11)),
+                                const Spacer(),
+                                // Delete button
+                                if (canDelete)
+                                  GestureDetector(
+                                    onTap: () => _showDeleteCommentDialog(context, postId, commentId, p),
+                                    child: Icon(Icons.delete_outline_rounded, size: 14, color: p.textMuted),
+                                  )
+                              ]),
+                              const SizedBox(height: 3),
+                              Text(c['text'] ?? '',
+                                style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.4)),
+                              
+                              const SizedBox(height: 6),
+                              // Like Comment Button
+                              GestureDetector(
+                                onTap: () => _toggleCommentLike(postId, commentId, commentLikes, commentOwnerId),
+                                child: Row(
+                                  children: [
+                                    Icon(isCommentLiked ? Icons.favorite_rounded : Icons.favorite_border_rounded, 
+                                        size: 12, color: isCommentLiked ? _K.danger : p.textMuted),
+                                    const SizedBox(width: 4),
+                                    Text(commentLikes.isNotEmpty ? '${commentLikes.length}' : 'Like', 
+                                        style: TextStyle(color: isCommentLiked ? _K.danger : p.textMuted, fontSize: 11, fontWeight: FontWeight.w600)),
+                                  ],
+                                ),
+                              )
+                            ])),
+                        ]),
+                    );
+                  });
+              })),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(color: p.surface,
+                  border: Border(top: BorderSide(color: p.border))),
+              child: Row(children: [
+                Expanded(child: TextField(controller: ctrl,
+                  style: TextStyle(color: p.textPrimary, fontSize: 14),
+                  cursorColor: _K.accent,
+                  decoration: InputDecoration(
+                    hintText: 'Add a comment…',
+                    hintStyle: TextStyle(color: p.textMuted),
+                    border: InputBorder.none, isDense: true))),
+                const SizedBox(width: 10),
+                GestureDetector(
+                  onTap: () async {
+                    if (ctrl.text.trim().isEmpty ||
+                        currentUser == null) return;
+                    final text = ctrl.text.trim();
+                    ctrl.clear();
+                    final me = await FirebaseFirestore.instance
+                        .collection('users').doc(currentUser!.uid).get();
+                    await FirebaseFirestore.instance.collection('feed')
+                        .doc(postId).collection('comments').add({
+                      'uid': currentUser!.uid,
+                      'username': me.data()?['username'] ?? 'User',
+                      'userPicUrl': me.data()?['profileImageUrl'] ?? '',
+                      'text': text,
+                      'likes': [], // Initialize likes array
+                      'createdAt': FieldValue.serverTimestamp(),
+                    });
+                    await FirebaseFirestore.instance.collection('feed')
+                        .doc(postId).update(
+                            {'commentCount': FieldValue.increment(1)});
+                    if (postOwnerId.isNotEmpty &&
+                        postOwnerId != currentUser!.uid) {
+                      try {
+                        await FirebaseFirestore.instance.collection('users')
+                            .doc(postOwnerId).collection('notifications')
+                            .add({
+                          'type': 'comment', 'senderId': currentUser!.uid,
+                          'senderName': me.data()?['username'] ?? 'Someone',
+                          'senderPic': me.data()?['profileImageUrl'] ?? '',
+                          'postId': postId, 'text': text, 'isRead': false,
+                          'createdAt': FieldValue.serverTimestamp(),
+                        });
+                      } catch (e) { debugPrint('Notif: $e'); }
+                    }
+                  },
+                  child: Container(width: 34, height: 34,
+                    decoration: const BoxDecoration(
+                        color: _K.accent, shape: BoxShape.circle),
+                    child: const Icon(Icons.arrow_upward_rounded,
+                        color: Colors.black, size: 18))),
+              ]),
             ),
           ]),
         ),
@@ -606,198 +377,410 @@ class _HomeView extends StatelessWidget {
     );
   }
 
-  Widget _buildCover(Book book) {
-    return ClipRRect(
-      borderRadius: const BorderRadius.only(
-        topLeft: Radius.circular(12), bottomLeft: Radius.circular(12)),
-      child: book.coverUrl != null && book.coverUrl!.isNotEmpty
-          ? Image.network(book.coverUrl!, width: 64, height: 96,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => _placeholderCover(book))
-          : _placeholderCover(book),
-    );
-  }
-
-  Widget _placeholderCover(Book book) {
-    return Container(
-      width: 64, height: 96,
-      decoration: BoxDecoration(
-        color: p.surfaceEl,
-        border: Border(right: BorderSide(color: p.border))),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(Icons.menu_book_rounded, color: p.textMuted, size: 22),
-        if (book.title != null) ...[
-          const SizedBox(height: 5),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 5),
-            child: Text((book.title ?? '').split(' ').take(2).join(' '),
-              textAlign: TextAlign.center, maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: p.textMuted, fontSize: 8,
-                fontWeight: FontWeight.w600, letterSpacing: 0.2)),
-          ),
-        ],
-      ]),
-    );
-  }
-}
-
-// ─── Shared dialog ────────────────────────────────────────────────────────────
-
-class _StyledDialog extends StatelessWidget {
-  final _P p;
-  final bool isDark;
-  final String title, body, cancelLabel, confirmLabel;
-  final Color confirmColor;
-  final VoidCallback onConfirm;
-
-  const _StyledDialog({
-    required this.p, required this.isDark, required this.title,
-    required this.body, required this.cancelLabel, required this.confirmLabel,
-    required this.confirmColor, required this.onConfirm,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
+  void _showDeleteDialog(BuildContext ctx, String postId, _P p) {
+    showDialog(context: ctx, builder: (dCtx) => Dialog(
       backgroundColor: p.surface,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
         child: Column(mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(title, style: TextStyle(color: p.textPrimary,
+          Text('Delete Post', style: TextStyle(color: p.textPrimary,
               fontSize: 16, fontWeight: FontWeight.w700)),
           const SizedBox(height: 10),
-          Text(body, style: TextStyle(color: p.textSecondary,
-              fontSize: 13, height: 1.5)),
+          Text('Are you sure you want to delete this activity?',
+            style: TextStyle(color: p.textSecondary,
+                fontSize: 13, height: 1.5)),
           const SizedBox(height: 22),
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-            GestureDetector(
-              onTap: () => Navigator.of(context).pop(false),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 9),
-                decoration: BoxDecoration(
-                  color: p.surfaceEl,
+          Row(children: [
+            Expanded(child: GestureDetector(
+              onTap: () => Navigator.pop(dCtx),
+              child: Container(height: 40,
+                decoration: BoxDecoration(color: p.surfaceEl,
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: p.border),
-                ),
-                child: Text(cancelLabel, style: TextStyle(
+                  border: Border.all(color: p.border)),
+                child: Center(child: Text('Cancel', style: TextStyle(
                     color: p.textSecondary, fontSize: 13,
-                    fontWeight: FontWeight.w500)),
-              ),
-            ),
+                    fontWeight: FontWeight.w500)))))),
             const SizedBox(width: 10),
-            GestureDetector(
-              onTap: onConfirm,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 9),
+            Expanded(child: GestureDetector(
+              onTap: () async {
+                Navigator.pop(dCtx);
+                await FirebaseFirestore.instance
+                    .collection('feed').doc(postId).delete();
+              },
+              child: Container(height: 40,
                 decoration: BoxDecoration(
-                  color: confirmColor.withOpacity(0.12),
+                  color: _K.danger.withOpacity(0.12),
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                      color: confirmColor.withOpacity(0.35)),
-                ),
-                child: Text(confirmLabel, style: TextStyle(
-                    color: confirmColor, fontSize: 13,
-                    fontWeight: FontWeight.w600)),
-              ),
-            ),
+                      color: _K.danger.withOpacity(0.35))),
+                child: const Center(child: Text('Delete',
+                  style: TextStyle(color: _K.danger, fontSize: 13,
+                      fontWeight: FontWeight.w600)))))),
           ]),
         ]),
       ),
-    );
+    ));
+  }
+
+  // --- NEW: Delete Comment Dialog ---
+  void _showDeleteCommentDialog(BuildContext ctx, String postId, String commentId, _P p) {
+    showDialog(context: ctx, builder: (dCtx) => Dialog(
+      backgroundColor: p.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+        child: Column(mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Delete Comment', style: TextStyle(color: p.textPrimary,
+              fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 10),
+          Text('Are you sure you want to delete this comment?',
+            style: TextStyle(color: p.textSecondary,
+                fontSize: 13, height: 1.5)),
+          const SizedBox(height: 22),
+          Row(children: [
+            Expanded(child: GestureDetector(
+              onTap: () => Navigator.pop(dCtx),
+              child: Container(height: 40,
+                decoration: BoxDecoration(color: p.surfaceEl,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: p.border)),
+                child: Center(child: Text('Cancel', style: TextStyle(
+                    color: p.textSecondary, fontSize: 13,
+                    fontWeight: FontWeight.w500)))))),
+            const SizedBox(width: 10),
+            Expanded(child: GestureDetector(
+              onTap: () async {
+                Navigator.pop(dCtx);
+                await FirebaseFirestore.instance.collection('feed').doc(postId).collection('comments').doc(commentId).delete();
+                await FirebaseFirestore.instance.collection('feed').doc(postId).update({'commentCount': FieldValue.increment(-1)});
+              },
+              child: Container(height: 40,
+                decoration: BoxDecoration(
+                  color: _K.danger.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: _K.danger.withOpacity(0.35))),
+                child: const Center(child: Text('Delete',
+                  style: TextStyle(color: _K.danger, fontSize: 13,
+                      fontWeight: FontWeight.w600)))))),
+          ]),
+        ]),
+      ),
+    ));
+  }
+
+  // ─── Build ────────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeNotifier,
+      builder: (_, ThemeMode mode, __) {
+        final p = mode == ThemeMode.dark ? _P.dark() : _P.light();
+
+        return Scaffold(
+          backgroundColor: p.bg,
+          appBar: AppBar(
+            backgroundColor: p.bg, elevation: 0,
+            surfaceTintColor: Colors.transparent, titleSpacing: 20,
+            title: Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Folio', style: TextStyle(color: p.textPrimary,
+                    fontSize: 24, fontWeight: FontWeight.w300,
+                    letterSpacing: -1.0)),
+                const Text('.', style: TextStyle(color: _K.accent,
+                    fontSize: 24, fontWeight: FontWeight.w700)),
+              ],
+            ),
+            actions: [
+              IconButton(
+                icon: Icon(Icons.search_rounded,
+                    color: p.textSecondary, size: 22),
+                onPressed: () => Navigator.push(context,
+                    MaterialPageRoute(
+                        builder: (_) => const UserSearchScreen()))),
+              StreamBuilder<QuerySnapshot>(
+                stream: currentUser == null ? const Stream.empty()
+                    : FirebaseFirestore.instance
+                        .collection('users').doc(currentUser!.uid)
+                        .collection('notifications')
+                        .where('isRead', isEqualTo: false).snapshots(),
+                builder: (_, snap) {
+                  final unread = snap.data?.docs.length ?? 0;
+                  return Badge(
+                    label: Text('$unread'),
+                    isLabelVisible: unread > 0,
+                    backgroundColor: _K.danger,
+                    offset: const Offset(-4, 4),
+                    child: IconButton(
+                      icon: Icon(Icons.notifications_none_rounded,
+                          color: p.textSecondary, size: 22),
+                      onPressed: () {
+                        _clearNotifications();
+                        Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const NotificationsScreen()));
+                      }));
+                }),
+              IconButton(
+                icon: Icon(Icons.send_rounded,
+                    color: p.textSecondary, size: 20),
+                onPressed: () => Navigator.push(context,
+                    MaterialPageRoute(
+                        builder: (_) => const InboxScreen()))),
+              const SizedBox(width: 4),
+            ],
+          ),
+          body: StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance.collection('feed')
+                .orderBy('createdAt', descending: true)
+                .limit(100).snapshots(),
+            builder: (_, snap) {
+              if (snap.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator(
+                    color: _K.accent, strokeWidth: 2.5));
+              }
+              final all = snap.data?.docs ?? [];
+              final docs = all.where((doc) {
+                final d = doc.data() as Map<String, dynamic>;
+                final oid = d['userId'] ?? '';
+                return oid == currentUser?.uid ||
+                    _followingIds.contains(oid);
+              }).toList();
+
+              if (docs.isEmpty) {
+                return Center(child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 40),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Container(width: 72, height: 72,
+                      decoration: BoxDecoration(color: p.surfaceEl,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: p.border)),
+                      child: Icon(Icons.people_alt_outlined,
+                          size: 30, color: p.textMuted)),
+                    const SizedBox(height: 20),
+                    Text('Your Feed', style: TextStyle(color: p.textPrimary,
+                        fontSize: 18, fontWeight: FontWeight.w600,
+                        letterSpacing: -0.4)),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Follow more people to see their reading activity here.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: p.textSecondary,
+                          fontSize: 13, height: 1.6)),
+                  ])));
+              }
+
+              return ListView.builder(
+                padding: const EdgeInsets.only(top: 8, bottom: 100),
+                itemCount: docs.length,
+                itemBuilder: (_, i) {
+                  final docId = docs[i].id;
+                  final data = docs[i].data() as Map<String, dynamic>;
+                  return _FeedCard(
+                    p: p, postId: docId, data: data,
+                    currentUserId: currentUser?.uid ?? '',
+                    timeAgo: _timeAgo,
+                    onLike: (likes) => _toggleLike(
+                        docId, likes, data['userId'] ?? ''),
+                    onComment: () => _showCommentsSheet(
+                        context, docId, data['userId'] ?? '', p),
+                    onDelete: () => _showDeleteDialog(context, docId, p),
+                  );
+                });
+            }),
+        );
+      });
   }
 }
 
-// ─── Small widgets ────────────────────────────────────────────────────────────
-
-class _NavBtn extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final VoidCallback onTap;
-  const _NavBtn({required this.icon, required this.color, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: onTap,
-    child: Icon(icon, color: color, size: 21),
-  );
-}
-
-class _SortToggle extends StatelessWidget {
+// ─── Feed card ────────────────────────────────────────────────────────────────
+class _FeedCard extends StatelessWidget {
   final _P p;
-  final bool active;
-  final VoidCallback onTap;
-  const _SortToggle(
-      {required this.p, required this.active, required this.onTap});
+  final String postId, currentUserId;
+  final Map<String, dynamic> data;
+  final String Function(Timestamp?) timeAgo;
+  final void Function(List) onLike;
+  final VoidCallback onComment, onDelete;
 
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: onTap,
-    child: AnimatedContainer(
-      duration: const Duration(milliseconds: 200),
-      padding: const EdgeInsets.symmetric(horizontal: 11),
-      decoration: BoxDecoration(
-        color: active ? _K.accentDim : Colors.transparent,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: active ? _K.accent.withOpacity(0.5) : p.border),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.tune_rounded, size: 12,
-            color: active ? _K.accent : p.textSecondary),
-        const SizedBox(width: 4),
-        Text('Sort', style: TextStyle(fontSize: 12,
-          fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-          color: active ? _K.accent : p.textSecondary)),
-      ]),
-    ),
-  );
-}
-
-class _FilterChip extends StatelessWidget {
-  final _P p;
-  final String label;
-  final int count;
-  final bool isSelected;
-  final Color? color;
-  final VoidCallback onTap;
-
-  const _FilterChip({
-    required this.p, required this.label, required this.count,
-    required this.isSelected, required this.onTap, this.color,
+  const _FeedCard({
+    required this.p, required this.postId, required this.currentUserId,
+    required this.data, required this.timeAgo, required this.onLike,
+    required this.onComment, required this.onDelete,
   });
 
   @override
   Widget build(BuildContext context) {
-    final active = color ?? _K.accent;
-    final isDark = p.bg == const Color(0xFF0F1117);
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        margin: const EdgeInsets.only(right: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 11),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? active.withOpacity(isDark ? 0.18 : 0.1)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: isSelected ? active.withOpacity(0.5) : p.border),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Text(label, style: TextStyle(fontSize: 12,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-            color: isSelected ? active : p.textSecondary)),
-          const SizedBox(width: 3),
-          Text('$count', style: TextStyle(fontSize: 11,
-            color: isSelected ? active.withOpacity(0.8) : p.textMuted)),
+    final ownerId    = data['userId'] ?? '';
+    final username   = data['username'] ?? 'Someone';
+    final userPic    = data['userPicUrl'] ?? '';
+    final action     = data['action'] ?? 'added a book';
+    final bookTitle  = data['bookTitle'] ?? 'Unknown Book';
+    final bookAuthor = data['bookAuthor'] ?? 'Unknown Author';
+    final coverUrl   = data['coverUrl'] ?? '';
+    final createdAt  = data['createdAt'] as Timestamp?;
+    final rating     = data['rating'] as int?;
+    final review     = data['reviewText'] as String?;
+    final List likes = data['likes'] ?? [];
+    final int cmts   = data['commentCount'] ?? 0;
+    final bool liked =
+        currentUserId.isNotEmpty && likes.contains(currentUserId);
+    final bool mine  =
+        currentUserId.isNotEmpty && ownerId == currentUserId;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+      decoration: BoxDecoration(color: p.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: p.border)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+
+          // ── Header ──────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 10, 0),
+            child: Row(children: [
+              GestureDetector(
+                onTap: () {
+                  if (ownerId.isNotEmpty) Navigator.push(context,
+                      MaterialPageRoute(builder: (_) =>
+                          ViewProfileScreen(userId: ownerId)));
+                },
+                child: Container(width: 34, height: 34,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle, color: p.surfaceEl,
+                    border: Border.all(color: p.border),
+                    image: userPic.isNotEmpty ? DecorationImage(
+                        image: NetworkImage(userPic),
+                        fit: BoxFit.cover) : null),
+                  child: userPic.isEmpty ? Icon(Icons.person_rounded,
+                      size: 18, color: p.textMuted) : null)),
+              const SizedBox(width: 10),
+              Expanded(child: RichText(text: TextSpan(
+                style: TextStyle(color: p.textSecondary, fontSize: 13),
+                children: [
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.baseline,
+                    baseline: TextBaseline.alphabetic,
+                    child: GestureDetector(
+                      onTap: () {
+                        if (ownerId.isNotEmpty) Navigator.push(context,
+                            MaterialPageRoute(builder: (_) =>
+                                ViewProfileScreen(userId: ownerId)));
+                      },
+                      child: Text(username, style: TextStyle(
+                          color: p.textPrimary,
+                          fontWeight: FontWeight.w600, fontSize: 13)))),
+                  TextSpan(text: '  $action'),
+                ]))),
+              const SizedBox(width: 8),
+              Text(timeAgo(createdAt),
+                  style: TextStyle(color: p.textMuted, fontSize: 11)),
+              if (mine) ...[
+                const SizedBox(width: 2),
+                GestureDetector(
+                  onTap: onDelete,
+                  child: Padding(padding: const EdgeInsets.all(4),
+                    child: Icon(Icons.delete_outline_rounded,
+                        size: 16, color: p.textMuted))),
+              ],
+            ])),
+
+          // ── Book ────────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ClipRRect(borderRadius: BorderRadius.circular(7),
+                  child: coverUrl.isNotEmpty
+                    ? Image.network(coverUrl, width: 52, height: 76,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _cover(p))
+                    : _cover(p)),
+                const SizedBox(width: 12),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(bookTitle, style: TextStyle(
+                        color: p.textPrimary, fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.2, height: 1.3),
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 3),
+                    Text(bookAuthor, style: TextStyle(
+                        color: p.textSecondary, fontSize: 12),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                    if (rating != null && rating > 0) ...[
+                      const SizedBox(height: 8),
+                      Row(mainAxisSize: MainAxisSize.min,
+                        children: List.generate(5, (i) => Padding(
+                          padding: const EdgeInsets.only(right: 2),
+                          child: Icon(
+                            i < rating
+                                ? Icons.star_rounded
+                                : Icons.star_outline_rounded,
+                            color: i < rating ? _K.amber : p.textMuted,
+                            size: 14)))),
+                    ],
+                  ])),
+              ])),
+
+          // ── Review ──────────────────────────────────────────────
+          if (review != null && review.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: p.surfaceEl,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(color: p.border)),
+                child: Text(review, style: TextStyle(
+                  color: p.textSecondary, fontSize: 13,
+                  height: 1.55, fontWeight: FontWeight.w400)))),
+
+          // ── Actions ─────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+            child: Row(children: [
+              GestureDetector(
+                onTap: () => onLike(likes),
+                child: Container(color: Colors.transparent,
+                  child: Row(children: [
+                    Icon(liked
+                        ? Icons.favorite_rounded
+                        : Icons.favorite_border_rounded,
+                      size: 18,
+                      color: liked ? _K.danger : p.textMuted),
+                    const SizedBox(width: 5),
+                    Text(likes.isNotEmpty ? '${likes.length}' : 'Like',
+                      style: TextStyle(
+                        color: liked ? _K.danger : p.textMuted,
+                        fontSize: 12, fontWeight: FontWeight.w600)),
+                  ]))),
+              const SizedBox(width: 20),
+              GestureDetector(
+                onTap: onComment,
+                child: Container(color: Colors.transparent,
+                  child: Row(children: [
+                    Icon(Icons.chat_bubble_outline_rounded,
+                        size: 16, color: p.textMuted),
+                    const SizedBox(width: 5),
+                    Text(cmts > 0 ? '$cmts' : 'Comment',
+                      style: TextStyle(color: p.textMuted,
+                        fontSize: 12, fontWeight: FontWeight.w600)),
+                  ]))),
+            ])),
         ]),
-      ),
     );
   }
+
+  Widget _cover(_P p) => Container(width: 52, height: 76,
+    decoration: BoxDecoration(color: p.surfaceEl,
+        borderRadius: BorderRadius.circular(7)),
+    child: Icon(Icons.book_outlined, color: p.textMuted, size: 22));
 }

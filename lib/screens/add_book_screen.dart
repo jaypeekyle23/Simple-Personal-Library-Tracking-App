@@ -140,8 +140,9 @@ class _AddBookScreenState extends State<AddBookScreen> {
     if (d['totalPages'] != null)   _pagesCtrl.text  = d['totalPages'].toString();
     if (d['datePublished'] != null) _dateCtrl.text  = d['datePublished'];
     if (d['coverUrl'] != null)     _coverUrl        = d['coverUrl'];
-    if (d['genres'] != null)
+    if (d['genres'] != null) {
       _genres = (d['genres'] as List).map((e) => e.toString()).toList();
+    }
   });
 
   void _showSearch(_P p) {
@@ -220,10 +221,13 @@ class _AddBookScreenState extends State<AddBookScreen> {
     }
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) { _snack('Not logged in.'); return; }
+    
     setState(() => _isSaving = true);
+    
     try {
       final ref = FirebaseFirestore.instance
           .collection('users').doc(user.uid).collection('books');
+      
       if (widget.book == null) {
         final ex = await ref.where('title', isEqualTo: _titleCtrl.text)
             .where('author', isEqualTo: _authorCtrl.text).get();
@@ -236,6 +240,7 @@ class _AddBookScreenState extends State<AddBookScreen> {
           if (go != true) { setState(() => _isSaving = false); return; }
         }
       }
+      
       final book = widget.book ?? Book();
       book.title = _titleCtrl.text; book.author = _authorCtrl.text;
       book.datePublished = _dateCtrl.text; book.edition = _editionCtrl.text;
@@ -245,8 +250,41 @@ class _AddBookScreenState extends State<AddBookScreen> {
       book.currentPage = int.tryParse(_curPageCtrl.text);
       book.readPercentage = double.tryParse(_pctCtrl.text);
       book.status = _status; book.format = _format;
-      if (book.id != null) await ref.doc(book.id).update(book.toMap());
-      else await ref.add(book.toMap());
+      
+      // Save locally to user's collection
+      if (book.id != null) {
+        await ref.doc(book.id).update(book.toMap());
+      } else {
+        await ref.add(book.toMap());
+      }
+
+      // ─── NEW: PUBLISH TO GLOBAL FEED ───
+      try {
+        // Fetch the user's profile to get their username and avatar
+        final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        final username = userDoc.data()?['username'] ?? 'A reader';
+        final userPic = userDoc.data()?['profileImageUrl'] ?? '';
+
+        // Dynamic action text based on their reading status
+        String actionText = 'added a book to their library';
+        if (_status == ReadingStatus.currentlyReading) actionText = 'started reading';
+        if (_status == ReadingStatus.read) actionText = 'finished reading';
+
+        await FirebaseFirestore.instance.collection('feed').add({
+          'userId': user.uid,
+          'username': username,
+          'userPicUrl': userPic,
+          'action': actionText,
+          'bookTitle': _titleCtrl.text.trim(),
+          'bookAuthor': _authorCtrl.text.trim(),
+          'coverUrl': _coverUrl ?? '',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      } catch (feedError) {
+        debugPrint('Error publishing to feed: $feedError');
+      }
+      // ───────────────────────────────────
+
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) _snack('Error saving: $e');
@@ -733,4 +771,3 @@ class _DupDialog extends StatelessWidget {
         ]),
       ])));
 }
-

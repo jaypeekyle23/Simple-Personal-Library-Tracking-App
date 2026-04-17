@@ -1,6 +1,7 @@
-class Book {
-  String? id; // Changed from Isar's int Id to a Firestore String id
+import 'package:cloud_firestore/cloud_firestore.dart';
 
+class Book {
+  String? id; 
   String? title;
   String? author;
 
@@ -16,10 +17,14 @@ class Book {
   int? currentPage;
   double? readPercentage;
 
+  // --- NEW FIELDS FOR REVIEWS ---
+  int? rating;    // 1-10 rating
+  String? review; // The text review
+  // ------------------------------
+
   ReadingStatus status;
   BookFormat format;
 
-  // Constructor
   Book({
     this.id,
     this.title,
@@ -32,6 +37,8 @@ class Book {
     this.genres,
     this.currentPage,
     this.readPercentage,
+    this.rating, // Added to constructor
+    this.review, // Added to constructor
     this.status = ReadingStatus.planToRead,
     this.format = BookFormat.paperback,
   });
@@ -49,15 +56,17 @@ class Book {
       'genres': genres,
       'currentPage': currentPage,
       'readPercentage': readPercentage,
-      'status': status.name, // Saves 'planToRead' instead of a confusing number
-      'format': format.name, // Saves 'paperback'
+      'rating': rating, // Added to Map
+      'review': review, // Added to Map
+      'status': status.name, 
+      'format': format.name, 
     };
   }
 
   // 2. Creates a Book object from Firestore data
   factory Book.fromMap(Map<String, dynamic> map, String documentId) {
     return Book(
-      id: documentId, // We grab the ID straight from the Firestore document
+      id: documentId, 
       title: map['title'] as String?,
       author: map['author'] as String?,
       datePublished: map['datePublished'] as String?,
@@ -65,13 +74,14 @@ class Book {
       isbn: map['isbn'] as String?,
       totalPages: map['totalPages'] as int?,
       coverUrl: map['coverUrl'] as String?,
-      // Safely turn the dynamic list back into a List<String>
       genres: (map['genres'] as List<dynamic>?)?.map((e) => e as String).toList(),
       currentPage: map['currentPage'] as int?,
-      // Sometimes Firestore saves doubles as ints if they are whole numbers, so we parse it safely
       readPercentage: (map['readPercentage'] as num?)?.toDouble(),
       
-      // Parse the strings back into your Enums safely
+      // Load the new fields safely
+      rating: map['rating'] as int?,
+      review: map['review'] as String?,
+      
       status: ReadingStatus.values.firstWhere(
         (e) => e.name == map['status'],
         orElse: () => ReadingStatus.planToRead,

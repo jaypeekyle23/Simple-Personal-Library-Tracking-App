@@ -16,6 +16,8 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // ADDED: Enable desugaring for flutter_local_notifications
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -25,9 +27,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.my_library_tracker"
-        
         minSdk = flutter.minSdkVersion
         
         // CHANGED: Bumped to 36 to match compileSdk
@@ -39,8 +39,6 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -48,4 +46,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // UPDATED: Use 2.1.4 as requested by the error message
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
