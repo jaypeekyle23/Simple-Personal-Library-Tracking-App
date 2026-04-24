@@ -74,6 +74,8 @@ class _ViewProfileScreenState extends State<ViewProfileScreen>
     with TickerProviderStateMixin {
   final currentUser = FirebaseAuth.instance.currentUser;
   bool _isLoading = true;
+  
+  bool _userNotFound = false; 
 
   String _username = 'Loading...';
   String _bio = '';
@@ -117,11 +119,34 @@ class _ViewProfileScreenState extends State<ViewProfileScreen>
 
   Future<void> _fetchData() async => await _fetchUserData();
 
+  // ─── NEW: Helper method to filter out deleted accounts ───
+  Future<int> _getValidUsersCount(List<dynamic> ids) async {
+    if (ids.isEmpty) return 0;
+    try {
+      final docs = await Future.wait(
+        ids.map((id) => FirebaseFirestore.instance.collection('users').doc(id.toString()).get())
+      );
+      return docs.where((doc) => doc.exists).length;
+    } catch (e) {
+      debugPrint('Error validating users: $e');
+      return ids.length; // Fallback to raw length if there is a network issue
+    }
+  }
+
   Future<void> _fetchUserData() async {
     try {
       final doc = await FirebaseFirestore.instance
           .collection('users').doc(widget.userId).get();
-      if (!doc.exists) return;
+          
+      if (!doc.exists) {
+        if (mounted) {
+          setState(() {
+            _userNotFound = true;
+            _isLoading = false; 
+          });
+        }
+        return;
+      }
 
       final data = doc.data()!;
       List<String?> favs = [null, null, null, null];
@@ -137,9 +162,6 @@ class _ViewProfileScreenState extends State<ViewProfileScreen>
       List following  = data['following'] ?? [];
       List requests   = data['followRequests'] ?? [];
 
-      _followerCount  = followers.length;
-      _followingCount = following.length;
-
       if (currentUser != null) {
         _isFollowing  = followers.contains(currentUser!.uid);
         _hasRequested = requests.contains(currentUser!.uid);
@@ -150,6 +172,10 @@ class _ViewProfileScreenState extends State<ViewProfileScreen>
       _profilePicUrl = data['profileImageUrl'] ?? '';
       _favoriteBookUrls = favs;
 
+      // Optimistically set the raw counts
+      _followerCount  = followers.length;
+      _followingCount = following.length;
+
       if (!isLocked()) {
         final snap = await FirebaseFirestore.instance
             .collection('users').doc(widget.userId).collection('books').get();
@@ -158,6 +184,19 @@ class _ViewProfileScreenState extends State<ViewProfileScreen>
       }
 
       if (mounted) setState(() => _isLoading = false);
+
+      // NEW: Cross-reference arrays to find only non-deleted accounts
+      int validFollowers = await _getValidUsersCount(followers);
+      int validFollowing = await _getValidUsersCount(following);
+
+      // Update UI with accurate count if it differs from the raw count
+      if (mounted && (validFollowers != followers.length || validFollowing != following.length)) {
+        setState(() {
+          _followerCount  = validFollowers;
+          _followingCount = validFollowing;
+        });
+      }
+
     } catch (e) {
       debugPrint('Error: $e');
       if (mounted) setState(() => _isLoading = false);
@@ -317,50 +356,63 @@ class _ViewProfileScreenState extends State<ViewProfileScreen>
                   color: p.textSecondary, size: 18),
               onPressed: () => Navigator.pop(context)),
             centerTitle: true,
-            title: _isLoading ? null : Text(_username,
+            title: _isLoading || _userNotFound ? null : Text(_username,
               style: TextStyle(color: p.textPrimary, fontSize: 16,
                 fontWeight: FontWeight.w600, letterSpacing: -0.3)),
           ),
           body: _isLoading
               ? const Center(child: CircularProgressIndicator(
                   color: _K.accent, strokeWidth: 2.5))
-              : CustomScrollView(slivers: [
-                  SliverToBoxAdapter(child: _buildProfileHeader(p)),
-                  if (isLocked())
-                    SliverFillRemaining(
-                      hasScrollBody: false,
-                      child: Center(child: Column(
+              : _userNotFound
+                  ? Center(
+                      child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Container(
-                            width: 72, height: 72,
-                            decoration: BoxDecoration(
-                              color: p.surfaceEl, shape: BoxShape.circle,
-                              border: Border.all(color: p.border)),
-                            child: Icon(Icons.lock_outline_rounded,
-                                size: 30, color: p.textMuted)),
+                          Icon(Icons.person_off_rounded, size: 64, color: p.textMuted.withOpacity(0.5)),
                           const SizedBox(height: 16),
-                          Text('This account is private', style: TextStyle(
-                            color: p.textSecondary, fontSize: 15,
-                            fontWeight: FontWeight.w300)),
-                          const SizedBox(height: 4),
-                          Text('Follow to see their books and reviews.',
-                            style: TextStyle(color: p.textMuted, fontSize: 12)),
+                          Text('User not found', style: TextStyle(color: p.textPrimary, fontSize: 20, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 8),
+                          Text('This account may have been deleted.', style: TextStyle(color: p.textSecondary, fontSize: 14)),
                         ],
-                      )),
+                      ),
                     )
-                  else ...[
-                    SliverToBoxAdapter(child: _buildFavoritesSection(p)),
-                    SliverToBoxAdapter(child: _buildLibraryDivider(p)),
-                    SliverToBoxAdapter(child: _buildSearchBar(p)),
-                    SliverToBoxAdapter(child: _buildFilterBar(p)),
-                    SliverToBoxAdapter(child: SizeTransition(
-                        sizeFactor: _filterAnim,
-                        child: _buildSortPanel(p))),
-                    SliverToBoxAdapter(child: _buildCountRow(p)),
-                    _buildBookList(p),
-                  ],
-                ]),
+                  : CustomScrollView(slivers: [
+                      SliverToBoxAdapter(child: _buildProfileHeader(p)),
+                      if (isLocked())
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Center(child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 72, height: 72,
+                                decoration: BoxDecoration(
+                                  color: p.surfaceEl, shape: BoxShape.circle,
+                                  border: Border.all(color: p.border)),
+                                child: Icon(Icons.lock_outline_rounded,
+                                    size: 30, color: p.textMuted)),
+                              const SizedBox(height: 16),
+                              Text('This account is private', style: TextStyle(
+                                color: p.textSecondary, fontSize: 15,
+                                fontWeight: FontWeight.w300)),
+                              const SizedBox(height: 4),
+                              Text('Follow to see their books and reviews.',
+                                style: TextStyle(color: p.textMuted, fontSize: 12)),
+                            ],
+                          )),
+                        )
+                      else ...[
+                        SliverToBoxAdapter(child: _buildFavoritesSection(p)),
+                        SliverToBoxAdapter(child: _buildLibraryDivider(p)),
+                        SliverToBoxAdapter(child: _buildSearchBar(p)),
+                        SliverToBoxAdapter(child: _buildFilterBar(p)),
+                        SliverToBoxAdapter(child: SizeTransition(
+                            sizeFactor: _filterAnim,
+                            child: _buildSortPanel(p))),
+                        SliverToBoxAdapter(child: _buildCountRow(p)),
+                        _buildBookList(p),
+                      ],
+                    ]),
         );
       },
     );

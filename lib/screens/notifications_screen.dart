@@ -28,9 +28,18 @@ class NotificationsScreen extends StatefulWidget {
 class _NotificationsScreenState extends State<NotificationsScreen> {
   final currentUser = FirebaseAuth.instance.currentUser;
 
-  // ─── NEW: Pre-define streams to prevent constant reloading ───
   late Stream<DocumentSnapshot> _userStream;
   late Stream<QuerySnapshot> _notifStream;
+  
+  // ─── NEW: Cache to prevent flickering and reduce Firestore reads ───
+  final Map<String, Future<DocumentSnapshot>> _userCache = {};
+
+  Future<DocumentSnapshot> _getUser(String uid) {
+    if (!_userCache.containsKey(uid)) {
+      _userCache[uid] = FirebaseFirestore.instance.collection('users').doc(uid).get();
+    }
+    return _userCache[uid]!;
+  }
 
   @override
   void initState() {
@@ -105,10 +114,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           body: currentUser == null 
             ? const Center(child: Text('Not logged in'))
             : StreamBuilder<DocumentSnapshot>(
-                stream: _userStream, // ─── USE PRE-DEFINED STREAM ───
+                stream: _userStream, 
                 builder: (context, reqSnapshot) {
                   return StreamBuilder<QuerySnapshot>(
-                    stream: _notifStream, // ─── USE PRE-DEFINED STREAM ───
+                    stream: _notifStream, 
                     builder: (context, notifSnapshot) {
                       
                       List requests = [];
@@ -133,9 +142,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                                 (context, index) {
                                   final requesterId = requests[index];
                                   return FutureBuilder<DocumentSnapshot>(
-                                    future: FirebaseFirestore.instance.collection('users').doc(requesterId).get(),
+                                    future: _getUser(requesterId), // ─── USE CACHE ───
                                     builder: (context, reqSnap) {
                                       if (!reqSnap.hasData) return const SizedBox.shrink();
+                                      if (!reqSnap.data!.exists) return const SizedBox.shrink(); // ─── HIDE DELETED ───
+
                                       final reqData = reqSnap.data!.data() as Map<String, dynamic>?;
                                       if (reqData == null) return const SizedBox.shrink();
 
@@ -202,82 +213,96 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                               delegate: SliverChildBuilderDelegate(
                                 (context, index) {
                                   final data = notifs[index].data() as Map<String, dynamic>;
-                                  final type = data['type'] ?? 'like';
-                                  final senderName = data['senderName'] ?? 'Someone';
-                                  final senderPic = data['senderPic'] ?? '';
-                                  final text = data['text'] ?? '';
                                   final senderId = data['senderId'] ?? '';
-                                  
-                                  IconData icon;
-                                  Color iconColor;
-                                  String actionText;
+                                  if (senderId.isEmpty) return const SizedBox.shrink();
 
-                                  if (type == 'like') {
-                                    icon = Icons.favorite_rounded;
-                                    iconColor = _K.red;
-                                    actionText = ' liked your post.';
-                                  } else if (type == 'comment_like') {
-                                    // NEW: Handle comment likes
-                                    icon = Icons.favorite_rounded;
-                                    iconColor = _K.red;
-                                    actionText = ' liked your comment.';
-                                  } else if (type == 'comment') {
-                                    icon = Icons.chat_bubble_rounded;
-                                    iconColor = _K.accent;
-                                    actionText = ' commented on your post.';
-                                  } else {
-                                    icon = Icons.person_add_rounded;
-                                    iconColor = _K.blue;
-                                    actionText = ' started following you.';
-                                  }
+                                  return FutureBuilder<DocumentSnapshot>(
+                                    future: _getUser(senderId), // ─── USE CACHE ───
+                                    builder: (context, senderSnap) {
+                                      if (!senderSnap.hasData) return const SizedBox.shrink();
+                                      if (!senderSnap.data!.exists) return const SizedBox.shrink(); // ─── HIDE DELETED ───
 
-                                  return Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(color: p.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: p.border)),
-                                    child: Row(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        GestureDetector(
-                                          onTap: () { if (senderId.isNotEmpty) Navigator.push(context, MaterialPageRoute(builder: (_) => ViewProfileScreen(userId: senderId))); },
-                                          child: Stack(
-                                            children: [
-                                              CircleAvatar(radius: 20, backgroundColor: p.surfaceEl, backgroundImage: senderPic.isNotEmpty ? NetworkImage(senderPic) : null, child: senderPic.isEmpty ? Icon(Icons.person, color: p.textMuted) : null),
-                                              Positioned(
-                                                bottom: 0, right: 0,
-                                                child: Container(
-                                                  padding: const EdgeInsets.all(3),
-                                                  decoration: BoxDecoration(color: p.surface, shape: BoxShape.circle),
-                                                  child: Icon(icon, size: 12, color: iconColor),
-                                                ),
-                                              )
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              RichText(
-                                                text: TextSpan(
-                                                  style: TextStyle(color: p.textSecondary, fontSize: 14, height: 1.4),
-                                                  children: [
-                                                    TextSpan(text: senderName, style: TextStyle(color: p.textPrimary, fontWeight: FontWeight.bold)),
-                                                    TextSpan(text: actionText),
-                                                  ]
-                                                )
+                                      final senderData = senderSnap.data!.data() as Map<String, dynamic>?;
+                                      if (senderData == null) return const SizedBox.shrink();
+
+                                      final type = data['type'] ?? 'like';
+                                      final text = data['text'] ?? '';
+                                      
+                                      // ─── USE FRESH DATA INSTEAD OF DUPLICATED DB FIELDS ───
+                                      final senderName = senderData['username'] ?? 'Someone';
+                                      final senderPic = senderData['profileImageUrl'] ?? '';
+
+                                      IconData icon;
+                                      Color iconColor;
+                                      String actionText;
+
+                                      if (type == 'like') {
+                                        icon = Icons.favorite_rounded;
+                                        iconColor = _K.red;
+                                        actionText = ' liked your post.';
+                                      } else if (type == 'comment_like') {
+                                        icon = Icons.favorite_rounded;
+                                        iconColor = _K.red;
+                                        actionText = ' liked your comment.';
+                                      } else if (type == 'comment') {
+                                        icon = Icons.chat_bubble_rounded;
+                                        iconColor = _K.accent;
+                                        actionText = ' commented on your post.';
+                                      } else {
+                                        icon = Icons.person_add_rounded;
+                                        iconColor = _K.blue;
+                                        actionText = ' started following you.';
+                                      }
+
+                                      return Container(
+                                        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), padding: const EdgeInsets.all(12),
+                                        decoration: BoxDecoration(color: p.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: p.border)),
+                                        child: Row(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            GestureDetector(
+                                              onTap: () { if (senderId.isNotEmpty) Navigator.push(context, MaterialPageRoute(builder: (_) => ViewProfileScreen(userId: senderId))); },
+                                              child: Stack(
+                                                children: [
+                                                  CircleAvatar(radius: 20, backgroundColor: p.surfaceEl, backgroundImage: senderPic.isNotEmpty ? NetworkImage(senderPic) : null, child: senderPic.isEmpty ? Icon(Icons.person, color: p.textMuted) : null),
+                                                  Positioned(
+                                                    bottom: 0, right: 0,
+                                                    child: Container(
+                                                      padding: const EdgeInsets.all(3),
+                                                      decoration: BoxDecoration(color: p.surface, shape: BoxShape.circle),
+                                                      child: Icon(icon, size: 12, color: iconColor),
+                                                    ),
+                                                  )
+                                                ],
                                               ),
-                                              if (type == 'comment' && text.isNotEmpty) ...[
-                                                const SizedBox(height: 4),
-                                                Text('"$text"', style: TextStyle(color: p.textPrimary, fontSize: 13, fontStyle: FontStyle.italic)),
-                                              ],
-                                              const SizedBox(height: 4),
-                                              Text(_timeAgo(data['createdAt'] as Timestamp?), style: TextStyle(color: p.textMuted, fontSize: 11)),
-                                            ],
-                                          ),
+                                            ),
+                                            const SizedBox(width: 12),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  RichText(
+                                                    text: TextSpan(
+                                                      style: TextStyle(color: p.textSecondary, fontSize: 14, height: 1.4),
+                                                      children: [
+                                                        TextSpan(text: senderName, style: TextStyle(color: p.textPrimary, fontWeight: FontWeight.bold)),
+                                                        TextSpan(text: actionText),
+                                                      ]
+                                                    )
+                                                  ),
+                                                  if (type == 'comment' && text.isNotEmpty) ...[
+                                                    const SizedBox(height: 4),
+                                                    Text('"$text"', style: TextStyle(color: p.textPrimary, fontSize: 13, fontStyle: FontStyle.italic)),
+                                                  ],
+                                                  const SizedBox(height: 4),
+                                                  Text(_timeAgo(data['createdAt'] as Timestamp?), style: TextStyle(color: p.textMuted, fontSize: 11)),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
                                         ),
-                                      ],
-                                    ),
+                                      );
+                                    },
                                   );
                                 },
                                 childCount: notifs.length,

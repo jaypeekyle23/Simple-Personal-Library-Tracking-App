@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart'; 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../main.dart';
 import '../services/export_service.dart';
 
@@ -18,14 +18,18 @@ class _K {
 class _P {
   final Color bg, surface, surfaceEl, border, divider,
       textPrimary, textSecondary, textMuted;
-  const _P({required this.bg, required this.surface, required this.surfaceEl,
+  const _P({
+    required this.bg, required this.surface, required this.surfaceEl,
     required this.border, required this.divider, required this.textPrimary,
-    required this.textSecondary, required this.textMuted});
+    required this.textSecondary, required this.textMuted
+  });
+  
   factory _P.dark() => const _P(
     bg: Color(0xFF0F1117), surface: Color(0xFF1A1D27),
     surfaceEl: Color(0xFF22263A), border: Color(0xFF2A2F45),
     divider: Color(0xFF252A3D), textPrimary: Color(0xFFEEEEEE),
     textSecondary: Color(0xFF8A8FA8), textMuted: Color(0xFF4A5068));
+    
   factory _P.light() => const _P(
     bg: Color(0xFFF4F5F7), surface: Color(0xFFFFFFFF),
     surfaceEl: Color(0xFFEEF0F4), border: Color(0xFFDDE0E8),
@@ -43,6 +47,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _isPrivate = false;
+  bool _isProcessing = false; // Tracks if we are deleting or logging out
   final user = FirebaseAuth.instance.currentUser;
 
   @override
@@ -74,9 +79,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _snack(BuildContext context, String msg, _P p) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg, style: TextStyle(color: p.textPrimary, fontSize: 13)),
-      backgroundColor: p.surfaceEl, behavior: SnackBarBehavior.floating,
+      backgroundColor: p.surfaceEl, 
+      behavior: SnackBarBehavior.floating,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      margin: const EdgeInsets.all(16)));
+      margin: const EdgeInsets.all(16)
+    ));
   }
 
   // ─── Logout Confirmation ───
@@ -104,12 +111,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
 
     if (shouldLogout == true) {
+      setState(() => _isProcessing = true);
       await FirebaseAuth.instance.signOut();
-      if (mounted) Navigator.pop(context); // Pop settings screen
+      // Notice there is NO Navigator.pop here. 
+      // The Auth Stream in main.dart handles the routing to the Login Screen automatically!
     }
   }
 
-  // ─── NEW: Delete Account Confirmation ───
+  // ─── Delete Account Confirmation ───
   Future<void> _confirmDeleteAccount(_P p) async {
     final shouldDelete = await showDialog<bool>(
       context: context,
@@ -134,21 +143,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
 
     if (shouldDelete == true && user != null) {
+      setState(() => _isProcessing = true);
+      
       try {
-        // 1. Delete from Firestore first
-        await FirebaseFirestore.instance.collection('users').doc(user!.uid).delete();
+        final uid = user!.uid;
+
+        // 1. Delete the 'books' subcollection first
+        final booksSnapshot = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .collection('books')
+            .get();
+            
+        for (var doc in booksSnapshot.docs) {
+          await doc.reference.delete();
+        }
+
+        // 2. Delete the main user document from Firestore
+        await FirebaseFirestore.instance.collection('users').doc(uid).delete();
         
-        // 2. Delete from Authentication
+        // 3. Delete from Authentication
         await user!.delete();
         
-        if (mounted) {
-          Navigator.pop(context); // Pop settings screen, auth state listener should handle routing to login
+        // The Auth stream in main.dart handles the routing automatically!
+
+      } on FirebaseAuthException catch (e) {
+        setState(() => _isProcessing = false);
+        if (e.code == 'requires-recent-login') {
+          _snack(context, 'Security check: Please log out and log back in before deleting your account.', p);
+        } else {
+          _snack(context, 'Error: ${e.message}', p);
         }
       } catch (e) {
+        setState(() => _isProcessing = false);
         debugPrint('Error deleting account: $e');
-        if (mounted) {
-          _snack(context, 'Failed to delete account. Please log out and log back in to verify your identity before deleting.', p);
-        }
+        _snack(context, 'An unexpected error occurred.', p);
       }
     }
   }
@@ -189,181 +218,194 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-          body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 48),
+          body: Stack(
             children: [
+              ListView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 48),
+                children: [
 
-              // ── ACCOUNT ─────────────────────────────────────────────
-              if (user != null) ...[
-                _SectionLabel('ACCOUNT', p),
-                _Card(p: p, child: Column(children: [
+                  // ── ACCOUNT ─────────────────────────────────────────────
+                  if (user != null) ...[
+                    _SectionLabel('ACCOUNT', p),
+                    _Card(p: p, child: Column(children: [
 
-                  // Email row
-                  Padding(
+                      // Email row
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+                        child: Row(children: [
+                          SizedBox(width: 20, child: Icon(Icons.person_outline_rounded, color: _K.accent, size: 20)),
+                          const SizedBox(width: 13),
+                          Expanded(child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Signed in as',
+                                style: TextStyle(color: p.textMuted,
+                                  fontSize: 11, fontWeight: FontWeight.w500,
+                                  letterSpacing: 0.3)),
+                              const SizedBox(height: 2),
+                              Text(user!.email ?? 'Unknown',
+                                style: TextStyle(color: p.textPrimary,
+                                  fontSize: 13, fontWeight: FontWeight.w500),
+                                maxLines: 1, overflow: TextOverflow.ellipsis),
+                            ])),
+                        ])),
+
+                      _Divider(p),
+
+                      // Private Account toggle
+                      _ToggleTile(
+                        p: p,
+                        icon: Icons.lock_outline_rounded,
+                        iconColor: p.textSecondary,
+                        title: 'Private Account',
+                        subtitle: 'Only approved followers see your library',
+                        value: _isPrivate,
+                        onChanged: _togglePrivacy,
+                      ),
+
+                      _Divider(p),
+
+                      // Sign Out
+                      _TapTile(
+                        p: p,
+                        icon: Icons.logout_rounded,
+                        iconColor: _K.red,
+                        title: 'Sign Out',
+                        subtitle: 'Log out of your account on this device',
+                        titleColor: _K.red,
+                        showChevron: false,
+                        onTap: () => _confirmLogout(p), 
+                      ),
+
+                      _Divider(p),
+
+                      // Delete Account
+                      _TapTile(
+                        p: p,
+                        icon: Icons.person_remove_rounded,
+                        iconColor: _K.red,
+                        title: 'Delete Account',
+                        subtitle: 'Permanently remove your account & data',
+                        titleColor: _K.red,
+                        showChevron: false,
+                        onTap: () => _confirmDeleteAccount(p), 
+                      ),
+                    ])),
+                    const SizedBox(height: 28),
+                  ],
+
+                  // ── APPEARANCE ──────────────────────────────────────────
+                  _SectionLabel('APPEARANCE', p),
+                  _Card(p: p, child: _ToggleTile(
+                    p: p,
+                    icon: isDark
+                        ? Icons.dark_mode_rounded
+                        : Icons.light_mode_rounded,
+                    iconColor: isDark ? _K.accent : p.textSecondary,
+                    title: 'Dark Mode',
+                    subtitle: isDark ? 'Currently using dark theme' : 'Currently using light theme',
+                    value: isDark,
+                    onChanged: (val) async {
+                      themeNotifier.value = val ? ThemeMode.dark : ThemeMode.light;
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.setBool('isDarkMode', val);
+                    },
+                  )),
+                  const SizedBox(height: 28),
+
+                  // ── DATA & BACKUPS ──────────────────────────────────────
+                  _SectionLabel('DATA & BACKUPS (IN DEVELOPMENT)', p),
+                  _Card(p: p, child: Column(children: [
+                    _TapTile(
+                      p: p,
+                      icon: Icons.ios_share_rounded,
+                      iconColor: _K.blue,
+                      title: 'Share CSV',
+                      subtitle: 'Send to Drive, Email, or Messaging apps',
+                      onTap: () async {
+                        _snack(context, 'Preparing your CSV…', p);
+                        await ExportService.shareLibraryCsv();
+                      }),
+                    _Divider(p),
+                    _TapTile(
+                      p: p,
+                      icon: Icons.download_rounded,
+                      iconColor: _K.accent,
+                      title: 'Download to Device',
+                      subtitle: "Save directly to your phone's local storage",
+                      onTap: () async {
+                        _snack(context, 'Saving CSV to device…', p);
+                        await ExportService.downloadLibraryCsvLocally();
+                        if (!context.mounted) return;
+                        _snack(context, 'Saved successfully!', p);
+                      }),
+                    _Divider(p),
+                    _TapTile(
+                      p: p,
+                      icon: Icons.upload_file_rounded,
+                      iconColor: _K.orange,
+                      title: 'Import from CSV',
+                      subtitle: 'Restore your library from a backup',
+                      onTap: () async {
+                        _snack(context, 'Select your CSV file…', p);
+                        final ok = await ExportService.importLibraryCsv();
+                        if (!context.mounted) return;
+                        _snack(context,
+                            ok ? 'Library restored!' : 'Import canceled or failed.', p);
+                      }),
+                  ])),
+                  const SizedBox(height: 28),
+
+                  // ── ABOUT ────────────────────────────────────────────────
+                  _SectionLabel('ABOUT', p),
+                  _Card(p: p, child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
                     child: Row(children: [
-                      SizedBox(width: 20, child: Icon(Icons.person_outline_rounded, color: _K.accent, size: 20)),
+                      SizedBox(width: 20, child: Icon(Icons.info_outline_rounded, color: p.textSecondary, size: 20)),
                       const SizedBox(width: 13),
-                      Expanded(child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Signed in as',
-                            style: TextStyle(color: p.textMuted,
-                              fontSize: 11, fontWeight: FontWeight.w500,
-                              letterSpacing: 0.3)),
-                          const SizedBox(height: 2),
-                          Text(user!.email ?? 'Unknown',
-                            style: TextStyle(color: p.textPrimary,
-                              fontSize: 13, fontWeight: FontWeight.w500),
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        ])),
-                    ])),
+                      Expanded(child: Text('Version',
+                        style: TextStyle(color: p.textPrimary,
+                          fontSize: 14, fontWeight: FontWeight.w500))),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: p.surfaceEl,
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(color: p.border)),
+                        child: Text('1.0.0.0',
+                          style: TextStyle(color: p.textMuted,
+                            fontSize: 12, fontWeight: FontWeight.w500,
+                            letterSpacing: 0.3))),
+                    ]))),
+                  const SizedBox(height: 48),
 
-                  _Divider(p),
-
-                  // Private Account toggle
-                  _ToggleTile(
-                    p: p,
-                    icon: Icons.lock_outline_rounded,
-                    iconColor: p.textSecondary,
-                    title: 'Private Account',
-                    subtitle: 'Only approved followers see your library',
-                    value: _isPrivate,
-                    onChanged: _togglePrivacy,
+                  // ── Footer ───────────────────────────────────────────────
+                  Center(child: Column(children: [
+                    Row(mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text('Folio', style: TextStyle(color: p.textMuted,
+                          fontSize: 13, fontWeight: FontWeight.w300,
+                          letterSpacing: -0.5)),
+                        const Text('.', style: TextStyle(color: _K.accent,
+                          fontSize: 13, fontWeight: FontWeight.w700)),
+                      ]),
+                    const SizedBox(height: 3),
+                    Text('Your personal reading tracker',
+                      style: TextStyle(color: p.textMuted, fontSize: 11)),
+                  ])),
+                ],
+              ),
+              
+              // Loading overlay when deleting/logging out
+              if (_isProcessing)
+                Container(
+                  color: p.bg.withOpacity(0.8),
+                  child: const Center(
+                    child: CircularProgressIndicator(color: _K.accent),
                   ),
-
-                  _Divider(p),
-
-                  // Sign Out
-                  _TapTile(
-                    p: p,
-                    icon: Icons.logout_rounded,
-                    iconColor: _K.red,
-                    title: 'Sign Out',
-                    subtitle: 'Log out of your account on this device',
-                    titleColor: _K.red,
-                    showChevron: false,
-                    onTap: () => _confirmLogout(p), 
-                  ),
-
-                  _Divider(p),
-
-                  // Delete Account
-                  _TapTile(
-                    p: p,
-                    icon: Icons.person_remove_rounded,
-                    iconColor: _K.red,
-                    title: 'Delete Account',
-                    subtitle: 'Permanently remove your account & data',
-                    titleColor: _K.red,
-                    showChevron: false,
-                    onTap: () => _confirmDeleteAccount(p), 
-                  ),
-                ])),
-                const SizedBox(height: 28),
-              ],
-
-              // ── APPEARANCE ──────────────────────────────────────────
-              _SectionLabel('APPEARANCE', p),
-              _Card(p: p, child: _ToggleTile(
-                p: p,
-                icon: isDark
-                    ? Icons.dark_mode_rounded
-                    : Icons.light_mode_rounded,
-                iconColor: isDark ? _K.accent : p.textSecondary,
-                title: 'Dark Mode',
-                subtitle: isDark ? 'Currently using dark theme' : 'Currently using light theme',
-                value: isDark,
-                onChanged: (val) async {
-                  themeNotifier.value = val ? ThemeMode.dark : ThemeMode.light;
-                  final prefs = await SharedPreferences.getInstance();
-                  await prefs.setBool('isDarkMode', val);
-                },
-              )),
-              const SizedBox(height: 28),
-
-              // ── DATA & BACKUPS ──────────────────────────────────────
-              _SectionLabel('DATA & BACKUPS (IN DEVELOPMENT)', p),
-              _Card(p: p, child: Column(children: [
-                _TapTile(
-                  p: p,
-                  icon: Icons.ios_share_rounded,
-                  iconColor: _K.blue,
-                  title: 'Share CSV',
-                  subtitle: 'Send to Drive, Email, or Messaging apps',
-                  onTap: () async {
-                    _snack(context, 'Preparing your CSV…', p);
-                    await ExportService.shareLibraryCsv();
-                  }),
-                _Divider(p),
-                _TapTile(
-                  p: p,
-                  icon: Icons.download_rounded,
-                  iconColor: _K.accent,
-                  title: 'Download to Device',
-                  subtitle: "Save directly to your phone's local storage",
-                  onTap: () async {
-                    _snack(context, 'Saving CSV to device…', p);
-                    await ExportService.downloadLibraryCsvLocally();
-                    if (!context.mounted) return;
-                    _snack(context, 'Saved successfully!', p);
-                  }),
-                _Divider(p),
-                _TapTile(
-                  p: p,
-                  icon: Icons.upload_file_rounded,
-                  iconColor: _K.orange,
-                  title: 'Import from CSV',
-                  subtitle: 'Restore your library from a backup',
-                  onTap: () async {
-                    _snack(context, 'Select your CSV file…', p);
-                    final ok = await ExportService.importLibraryCsv();
-                    if (!context.mounted) return;
-                    _snack(context,
-                        ok ? 'Library restored!' : 'Import canceled or failed.', p);
-                  }),
-              ])),
-              const SizedBox(height: 28),
-
-              // ── ABOUT ────────────────────────────────────────────────
-              _SectionLabel('ABOUT', p),
-              _Card(p: p, child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-                child: Row(children: [
-                  SizedBox(width: 20, child: Icon(Icons.info_outline_rounded, color: p.textSecondary, size: 20)),
-                  const SizedBox(width: 13),
-                  Expanded(child: Text('Version',
-                    style: TextStyle(color: p.textPrimary,
-                      fontSize: 14, fontWeight: FontWeight.w500))),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: p.surfaceEl,
-                      borderRadius: BorderRadius.circular(7),
-                      border: Border.all(color: p.border)),
-                    child: Text('1.0.0.0',
-                      style: TextStyle(color: p.textMuted,
-                        fontSize: 12, fontWeight: FontWeight.w500,
-                        letterSpacing: 0.3))),
-                ]))),
-              const SizedBox(height: 48),
-
-              // ── Footer ───────────────────────────────────────────────
-              Center(child: Column(children: [
-                Row(mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text('Folio', style: TextStyle(color: p.textMuted,
-                      fontSize: 13, fontWeight: FontWeight.w300,
-                      letterSpacing: -0.5)),
-                    const Text('.', style: TextStyle(color: _K.accent,
-                      fontSize: 13, fontWeight: FontWeight.w700)),
-                  ]),
-                const SizedBox(height: 3),
-                Text('Your personal reading tracker',
-                  style: TextStyle(color: p.textMuted, fontSize: 11)),
-              ])),
+                ),
             ],
           ),
         );
@@ -374,7 +416,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
 // ─── Shared Widgets ───────────────────────────────────────────────────────────
 
-/// Uniform custom toggle — identical look for both dark mode & private account.
 class _CustomToggle extends StatelessWidget {
   final bool value;
   final ValueChanged<bool> onChanged;
@@ -404,7 +445,6 @@ class _CustomToggle extends StatelessWidget {
             shape: BoxShape.circle)))));
 }
 
-/// A row with a toggle — no chevron.
 class _ToggleTile extends StatelessWidget {
   final _P p;
   final IconData icon;
@@ -438,7 +478,6 @@ class _ToggleTile extends StatelessWidget {
     ]));
 }
 
-/// A tappable row — optionally shows chevron.
 class _TapTile extends StatelessWidget {
   final _P p;
   final IconData icon;

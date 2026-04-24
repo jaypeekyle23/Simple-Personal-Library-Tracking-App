@@ -109,13 +109,30 @@ class _ProfileScreenState extends State<ProfileScreen>
     await Future.wait([_fetchUserData(), _fetchBooks()]);
   }
 
+  // ─── NEW: Helper method to filter out deleted accounts ───
+  Future<int> _getValidUsersCount(List<dynamic> ids) async {
+    if (ids.isEmpty) return 0;
+    try {
+      // Fire requests for all IDs simultaneously for speed
+      final docs = await Future.wait(
+        ids.map((id) => FirebaseFirestore.instance.collection('users').doc(id.toString()).get())
+      );
+      // Return only the count of documents that actually still exist
+      return docs.where((doc) => doc.exists).length;
+    } catch (e) {
+      debugPrint('Error validating users: $e');
+      return ids.length; // Fallback to raw length if there is a network issue
+    }
+  }
+
   Future<void> _fetchUserData() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
       final doc = await FirebaseFirestore.instance
           .collection('users').doc(user.uid).get();
-      if (doc.exists && mounted) {
+          
+      if (doc.exists) {
         final data = doc.data()!;
         List<String?> favs = [null, null, null, null];
         if (data['favorites'] != null) {
@@ -124,14 +141,34 @@ class _ProfileScreenState extends State<ProfileScreen>
             favs[i] = f[i] as String?;
           }
         }
-        setState(() {
-          _username       = data['username'] ?? 'Reader';
-          _bio            = data['bio'] ?? '';
-          _profilePicUrl  = data['profileImageUrl'] ?? '';
-          _favoriteBookUrls = favs;
-          _followerCount  = (data['followers'] as List? ?? []).length;
-          _followingCount = (data['following'] as List? ?? []).length;
-        });
+        
+        List<dynamic> rawFollowers = data['followers'] ?? [];
+        List<dynamic> rawFollowing = data['following'] ?? [];
+
+        // 1. Optimistically set the state with whatever is currently there so the UI doesn't hang
+        if (mounted) {
+          setState(() {
+            _username       = data['username'] ?? 'Reader';
+            _bio            = data['bio'] ?? '';
+            _profilePicUrl  = data['profileImageUrl'] ?? '';
+            _favoriteBookUrls = favs;
+            _followerCount  = rawFollowers.length;
+            _followingCount = rawFollowing.length;
+          });
+        }
+
+        // 2. Cross-reference the arrays with Firestore to filter out deleted accounts
+        int validFollowers = await _getValidUsersCount(rawFollowers);
+        int validFollowing = await _getValidUsersCount(rawFollowing);
+
+        // 3. Update the UI with the 100% accurate count
+        if (mounted && (validFollowers != rawFollowers.length || validFollowing != rawFollowing.length)) {
+          setState(() {
+            _followerCount  = validFollowers;
+            _followingCount = validFollowing;
+          });
+        }
+        
       } else if (mounted) {
         setState(() => _username = 'Reader');
       }
@@ -213,7 +250,6 @@ class _ProfileScreenState extends State<ProfileScreen>
     _showFilters ? _filterAnimController.forward() : _filterAnimController.reverse();
   }
 
-  // ─── NEW: Logout Confirmation Method ───
   Future<void> _confirmLogout(_P p) async {
     final shouldLogout = await showDialog<bool>(
       context: context,
@@ -311,7 +347,7 @@ class _ProfileScreenState extends State<ProfileScreen>
       actions: [
         IconButton(
           icon: Icon(Icons.logout_rounded, color: p.textMuted, size: 20),
-          onPressed: () => _confirmLogout(p), // WIRED THE NEW CONFIRMATION HERE
+          onPressed: () => _confirmLogout(p), 
         ),
       ],
     );

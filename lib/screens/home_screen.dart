@@ -76,13 +76,39 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // ─── UPDATED: Filter out deleted accounts so their posts don't appear ───
   void _listenToFollowingList() {
     if (currentUser == null) return;
     _userSubscription = FirebaseFirestore.instance
-        .collection('users').doc(currentUser!.uid).snapshots().listen((doc) {
+        .collection('users').doc(currentUser!.uid).snapshots().listen((doc) async {
       if (doc.exists && mounted) {
-        setState(() => _followingIds =
-            List<String>.from(doc.data()?['following'] ?? []));
+        final rawFollowing = List<String>.from(doc.data()?['following'] ?? []);
+        
+        if (rawFollowing.isEmpty) {
+          setState(() => _followingIds = []);
+          return;
+        }
+        
+        try {
+          // Cross-reference to find only users that still exist
+          final validDocs = await Future.wait(
+            rawFollowing.map((id) => FirebaseFirestore.instance.collection('users').doc(id).get())
+          );
+          
+          final validIds = validDocs
+              .where((d) => d.exists)
+              .map((d) => d.id)
+              .toList();
+              
+          // Update the list with ONLY valid IDs. Ghost accounts are dropped.
+          if (mounted) {
+            setState(() => _followingIds = validIds);
+          }
+        } catch (e) {
+          debugPrint('Error validating following list: $e');
+          // Fallback in case of a network error
+          if (mounted) setState(() => _followingIds = rawFollowing);
+        }
       }
     });
   }
@@ -548,6 +574,8 @@ class _HomeScreenState extends State<HomeScreen> {
               final docs = all.where((doc) {
                 final d = doc.data() as Map<String, dynamic>;
                 final oid = d['userId'] ?? '';
+                // Since _followingIds only contains active users, 
+                // posts from deleted accounts will naturally fail this check and hide!
                 return oid == currentUser?.uid ||
                     _followingIds.contains(oid);
               }).toList();

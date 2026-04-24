@@ -31,65 +31,73 @@ class FollowListScreen extends StatefulWidget {
   final String userId;
   final int initialIndex;
 
-  const FollowListScreen(
-      {super.key, required this.userId, this.initialIndex = 0});
+  const FollowListScreen({
+    super.key,
+    required this.userId,
+    this.initialIndex = 0,
+  });
 
   @override
   State<FollowListScreen> createState() => _FollowListScreenState();
 }
 
-class _FollowListScreenState extends State<FollowListScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-  List<String> _followersIds = [];
-  List<String> _followingIds = [];
+class _FollowListScreenState extends State<FollowListScreen> {
   bool _isLoading = true;
+  List<Map<String, dynamic>> _followers = [];
+  List<Map<String, dynamic>> _following = [];
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(
-        length: 2, vsync: this, initialIndex: widget.initialIndex);
-    _fetchConnections();
+    _loadData();
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _fetchConnections() async {
+  Future<void> _loadData() async {
     try {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.userId)
-          .get();
-      if (doc.exists) {
-        final data = doc.data()!;
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users').doc(widget.userId).get();
+          
+      if (!userDoc.exists) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+
+      final data = userDoc.data()!;
+      final rawFollowers = List<dynamic>.from(data['followers'] ?? []);
+      final rawFollowing = List<dynamic>.from(data['following'] ?? []);
+
+      // Helper to fetch only accounts that still exist in the database
+      Future<List<Map<String, dynamic>>> fetchValidUsers(List<dynamic> ids) async {
+        if (ids.isEmpty) return [];
+        final docs = await Future.wait(
+          ids.map((id) => FirebaseFirestore.instance.collection('users').doc(id.toString()).get())
+        );
+        
+        // Filter out deleted accounts by checking doc.exists
+        return docs
+            .where((doc) => doc.exists)
+            .map((doc) => {
+                  'uid': doc.id,
+                  ...?doc.data(),
+                })
+            .toList();
+      }
+
+      // We wait for the clean data before we build the lists
+      final validFollowers = await fetchValidUsers(rawFollowers);
+      final validFollowing = await fetchValidUsers(rawFollowing);
+
+      if (mounted) {
         setState(() {
-          _followersIds = List<String>.from(data['followers'] ?? []);
-          _followingIds = List<String>.from(data['following'] ?? []);
+          _followers = validFollowers; // This is the clean, 100% accurate list
+          _following = validFollowing; // This is the clean, 100% accurate list
           _isLoading = false;
         });
       }
     } catch (e) {
-      debugPrint('Error fetching connections: $e');
-      setState(() => _isLoading = false);
+      debugPrint('Error loading follow list: $e');
+      if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  Future<List<Map<String, dynamic>>> _getUsersData(
-      List<String> ids) async {
-    List<Map<String, dynamic>> users = [];
-    for (String id in ids) {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(id)
-          .get();
-      if (doc.exists) users.add({'id': id, ...doc.data()!});
-    }
-    return users;
   }
 
   @override
@@ -98,104 +106,75 @@ class _FollowListScreenState extends State<FollowListScreen>
       valueListenable: themeNotifier,
       builder: (_, ThemeMode mode, __) {
         final p = mode == ThemeMode.dark ? _P.dark() : _P.light();
-
-        return Scaffold(
-          backgroundColor: p.bg,
-          appBar: AppBar(
+        
+        return DefaultTabController(
+          length: 2,
+          initialIndex: widget.initialIndex,
+          child: Scaffold(
             backgroundColor: p.bg,
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            leading: IconButton(
-              icon: Icon(Icons.arrow_back_ios_new_rounded,
-                  color: p.textSecondary, size: 18),
-              onPressed: () => Navigator.pop(context)),
-            centerTitle: true,
-            title: Text('Connections',
-              style: TextStyle(color: p.textPrimary, fontSize: 16,
-                fontWeight: FontWeight.w600, letterSpacing: -0.3)),
-            bottom: PreferredSize(
-              preferredSize: const Size.fromHeight(44),
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: p.border))),
-                child: TabBar(
-                  controller: _tabController,
-                  indicator: const UnderlineTabIndicator(
-                    borderSide: BorderSide(
-                        color: Color(0xFF00C030), width: 2),
-                    insets: EdgeInsets.symmetric(horizontal: 24)),
-                  indicatorSize: TabBarIndicatorSize.tab,
-                  labelColor: _K.accent,
-                  unselectedLabelColor: p.textMuted,
-                  labelStyle: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w700),
-                  unselectedLabelStyle: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w400),
-                  tabs: [
-                    Tab(text: 'Followers ${_isLoading ? '' : '(${_followersIds.length})'}'),
-                    Tab(text: 'Following ${_isLoading ? '' : '(${_followingIds.length})'}'),
-                  ],
-                ),
+            appBar: AppBar(
+              backgroundColor: p.bg,
+              elevation: 0,
+              surfaceTintColor: Colors.transparent,
+              leading: IconButton(
+                icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.textSecondary, size: 18),
+                onPressed: () => Navigator.pop(context),
+              ),
+              bottom: TabBar(
+                indicatorColor: _K.accent,
+                indicatorWeight: 3,
+                labelColor: p.textPrimary,
+                unselectedLabelColor: p.textMuted,
+                labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                unselectedLabelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                dividerColor: p.divider,
+                tabs: [
+                  // Now it uses the length of the valid list, not the raw array
+                  Tab(text: _isLoading ? 'Followers' : 'Followers (${_followers.length})'),
+                  Tab(text: _isLoading ? 'Following' : 'Following (${_following.length})'),
+                ],
               ),
             ),
+            body: _isLoading
+                ? const Center(child: CircularProgressIndicator(color: _K.accent))
+                : TabBarView(
+                    children: [
+                      _buildList(_followers, p, 'No followers yet.'),
+                      _buildList(_following, p, 'Not following anyone yet.'),
+                    ],
+                  ),
           ),
-          body: _isLoading
-              ? const Center(child: CircularProgressIndicator(
-                  color: _K.accent, strokeWidth: 2.5))
-              : TabBarView(
-                  controller: _tabController,
-                  children: [
-                    _buildUserList(_followersIds, p),
-                    _buildUserList(_followingIds, p),
-                  ],
-                ),
         );
       },
     );
   }
 
-  Widget _buildUserList(List<String> ids, _P p) {
-    if (ids.isEmpty) {
+  Widget _buildList(List<Map<String, dynamic>> users, _P p, String emptyMsg) {
+    if (users.isEmpty) {
       return Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.people_outline_rounded, size: 44, color: p.textMuted),
-          const SizedBox(height: 14),
-          Text('No users here yet',
-            style: TextStyle(color: p.textSecondary,
-              fontSize: 15, fontWeight: FontWeight.w300)),
-        ]));
+        child: Text(emptyMsg,
+          style: TextStyle(color: p.textMuted, fontSize: 14, fontWeight: FontWeight.w500)),
+      );
     }
 
-    return FutureBuilder<List<Map<String, dynamic>>>(
-      future: _getUsersData(ids),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator(
-              color: _K.accent, strokeWidth: 2.5));
-        }
-        final users = snapshot.data ?? [];
-        return ListView.separated(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          itemCount: users.length,
-          separatorBuilder: (_, __) => Container(
-            margin: const EdgeInsets.only(left: 76),
-            height: 1,
-            color: p.divider),
-          itemBuilder: (context, index) {
-            final user = users[index];
-            final picUrl   = user['profileImageUrl'] ?? '';
-            final username = user['username'] ?? 'Reader';
-            final bio      = user['bio'] ?? '';
-
-            return _UserTile(
-              p: p,
-              picUrl: picUrl,
-              username: username,
-              bio: bio,
-              onTap: () => Navigator.push(context,
-                MaterialPageRoute(builder: (_) =>
-                    ViewProfileScreen(userId: user['id']))),
-            );
+    return ListView.separated(
+      itemCount: users.length,
+      separatorBuilder: (_, __) => Padding(
+        padding: const EdgeInsets.only(left: 70),
+        child: Container(height: 1, color: p.divider),
+      ),
+      itemBuilder: (context, index) {
+        final user = users[index];
+        return _UserTile(
+          p: p,
+          uid: user['uid'],
+          username: user['username'] ?? 'Unknown User',
+          picUrl: user['profileImageUrl'] ?? '',
+          bio: user['bio'] ?? '',
+          onTap: () {
+            Navigator.push(context, MaterialPageRoute(
+              builder: (_) => ViewProfileScreen(userId: user['uid'])
+            ));
           },
         );
       },
@@ -203,15 +182,15 @@ class _FollowListScreenState extends State<FollowListScreen>
   }
 }
 
-// ─── User tile ────────────────────────────────────────────────────────────────
+// ─── User Tile ────────────────────────────────────────────────────────────────
 class _UserTile extends StatelessWidget {
   final _P p;
-  final String picUrl, username, bio;
+  final String uid, username, picUrl, bio;
   final VoidCallback onTap;
 
   const _UserTile({
-    required this.p, required this.picUrl, required this.username,
-    required this.bio, required this.onTap,
+    required this.p, required this.uid, required this.username,
+    required this.picUrl, required this.bio, required this.onTap,
   });
 
   @override
@@ -251,8 +230,7 @@ class _UserTile extends StatelessWidget {
             ])),
 
           // Chevron
-          Icon(Icons.chevron_right_rounded,
-              color: p.textMuted, size: 18),
+          Icon(Icons.chevron_right_rounded, color: p.textMuted, size: 18),
         ]),
       ),
     );
